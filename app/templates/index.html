@@ -20,6 +20,19 @@
                 </div>
                 {% endfor %}
             </div>
+
+            <div class="kb-section">
+                <div class="kb-header">
+                    <span class="kb-title">知识库</span>
+                    <label class="upload-btn-label" title="上传文档">
+                        <input type="file" id="file-upload" accept=".txt,.md,.pdf,.docx" hidden>
+                        <span class="upload-btn">+</span>
+                    </label>
+                </div>
+                <div class="kb-doc-list" id="kb-doc-list">
+                    <div class="kb-empty">暂无文档，点击 + 上传</div>
+                </div>
+            </div>
         </aside>
 
         <main class="chat-area">
@@ -32,7 +45,7 @@
             <div class="messages-container" id="messages-container">
                 <div class="welcome-message">
                     <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
-                    <p class="hint">支持工具调用 · 流式输出 · 上下文压缩</p>
+                    <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
                 </div>
             </div>
 

@@ -45,6 +45,23 @@ TOOLS = [
                 "required": ["query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_search",
+            "description": "从知识库中检索与用户问题相关的文档内容。当用户的问题可能涉及已上传的文档资料时使用此工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "用于在知识库中检索的查询内容，应该是用户问题的核心关键词或摘要"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]
 
@@ -66,5 +83,19 @@ def execute_tool(name, arguments):
         return json.dumps({
             "results": f"关于「{args['query']}」的搜索结果（模拟数据，请接入实际搜索API）"
         })
+
+    if name == "knowledge_search":
+        from app.services.rag_service import search
+        results = search(args["query"])
+        if not results:
+            return json.dumps({"message": "知识库中未找到相关内容", "results": []})
+        formatted = [
+            {
+                "source": r["filename"],
+                "content": r["content"],
+            }
+            for r in results
+        ]
+        return json.dumps({"results": formatted}, ensure_ascii=False)
 
     return json.dumps({"error": f"未知工具: {name}"})

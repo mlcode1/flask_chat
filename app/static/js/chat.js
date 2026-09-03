@@ -6,12 +6,15 @@
     const newChatBtn = document.getElementById("new-chat-btn");
     const convList = document.getElementById("conversation-list");
     const modelSelector = document.getElementById("model-selector");
+    const fileUpload = document.getElementById("file-upload");
+    const kbDocList = document.getElementById("kb-doc-list");
 
     let currentConvId = null;
     let isStreaming = false;
     let currentAbortController = null;
 
     loadModels();
+    loadDocuments();
 
     const activeConvs = document.querySelectorAll(".conversation-item");
     if (activeConvs.length > 0) {
@@ -113,7 +116,7 @@
                 messagesContainer.innerHTML = `
                     <div class="welcome-message">
                         <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
-                        <p class="hint">支持工具调用 · 流式输出 · 上下文压缩</p>
+                        <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
                     </div>`;
                 return;
             }
@@ -264,7 +267,7 @@
                         messagesContainer.innerHTML = `
                             <div class="welcome-message">
                                 <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
-                                <p class="hint">支持工具调用 · 流式输出 · 上下文压缩</p>
+                                <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
                             </div>`;
                     }
                 }
@@ -282,7 +285,7 @@
         messagesContainer.innerHTML = `
             <div class="welcome-message">
                 <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
-                <p class="hint">支持工具调用 · 流式输出 · 上下文压缩</p>
+                <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
             </div>`;
     });
 
@@ -299,5 +302,74 @@
     messageInput.addEventListener("input", function () {
         this.style.height = "auto";
         this.style.height = Math.min(this.scrollHeight, 120) + "px";
+    });
+
+    async function loadDocuments() {
+        try {
+            const res = await fetch("/api/documents");
+            const docs = await res.json();
+            renderDocuments(docs);
+        } catch (e) {
+            console.error("加载文档列表失败:", e);
+        }
+    }
+
+    function renderDocuments(docs) {
+        if (!docs || docs.length === 0) {
+            kbDocList.innerHTML = '<div class="kb-empty">暂无文档，点击 + 上传</div>';
+            return;
+        }
+        kbDocList.innerHTML = "";
+        docs.forEach(doc => {
+            const item = document.createElement("div");
+            item.className = "kb-doc-item";
+            const sizeStr = doc.file_size > 1024 * 1024
+                ? (doc.file_size / 1024 / 1024).toFixed(1) + " MB"
+                : (doc.file_size / 1024).toFixed(1) + " KB";
+            item.innerHTML = `
+                <div class="kb-doc-info">
+                    <span class="kb-doc-name" title="${doc.filename}">${doc.filename}</span>
+                    <span class="kb-doc-meta">${doc.chunk_count} 块 · ${sizeStr}</span>
+                </div>
+                <button class="kb-doc-delete" data-id="${doc.id}">×</button>
+            `;
+            const delBtn = item.querySelector(".kb-doc-delete");
+            delBtn.addEventListener("click", async () => {
+                await fetch(`/api/documents/${doc.id}`, { method: "DELETE" });
+                loadDocuments();
+            });
+            kbDocList.appendChild(item);
+        });
+    }
+
+    fileUpload.addEventListener("change", async function () {
+        const file = this.files[0];
+        if (!file) return;
+        this.value = "";
+
+        kbDocList.innerHTML = `
+            <div class="kb-uploading">
+                正在处理 ${file.name}...
+                <div class="upload-progress"><div class="upload-progress-bar"></div></div>
+            </div>
+        `;
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        try {
+            const res = await fetch("/api/documents/upload", {
+                method: "POST",
+                body: formData,
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                alert(data.error || "上传失败");
+            }
+            loadDocuments();
+        } catch (e) {
+            alert("上传失败: " + e.message);
+            loadDocuments();
+        }
     });
 })();

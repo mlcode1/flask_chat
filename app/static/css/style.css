@@ -383,7 +383,145 @@ body {
     .conv-title, .sidebar-header {
         display: none;
     }
+    .kb-section {
+        display: none;
+    }
     .message-row {
         max-width: 90%;
     }
+}
+
+/* Knowledge Base Section */
+.kb-section {
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 12px;
+    flex-shrink: 0;
+}
+
+.kb-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.kb-title {
+    color: var(--text-sidebar);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.upload-btn-label {
+    cursor: pointer;
+}
+
+.upload-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    background: var(--accent);
+    color: white;
+    font-size: 16px;
+    line-height: 1;
+    transition: background 0.2s;
+}
+
+.upload-btn:hover {
+    background: #06a953;
+}
+
+.kb-doc-list {
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.kb-empty {
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-align: center;
+    padding: 12px 0;
+}
+
+.kb-doc-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-radius: 6px;
+    margin-bottom: 4px;
+    transition: background 0.2s;
+}
+
+.kb-doc-item:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.kb-doc-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.kb-doc-name {
+    color: var(--text-sidebar);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+}
+
+.kb-doc-meta {
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.kb-doc-delete {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 2px 4px;
+    opacity: 0;
+    transition: opacity 0.2s, color 0.2s;
+}
+
+.kb-doc-item:hover .kb-doc-delete {
+    opacity: 1;
+}
+
+.kb-doc-delete:hover {
+    color: var(--danger);
+}
+
+.kb-uploading {
+    color: var(--text-sidebar);
+    font-size: 12px;
+    text-align: center;
+    padding: 8px 0;
+}
+
+.upload-progress {
+    width: 100%;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    margin-top: 6px;
+    overflow: hidden;
+}
+
+.upload-progress-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    animation: progressAnim 2s ease-in-out infinite;
+    width: 30%;
+}
+
+@keyframes progressAnim {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
 }
