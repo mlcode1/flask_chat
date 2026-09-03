@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智能助手</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <button id="new-chat-btn" class="new-chat-btn">+ 新对话</button>
+            </div>
+            <div class="conversation-list" id="conversation-list">
+                {% for conv in conversations %}
+                <div class="conversation-item {% if loop.first %}active{% endif %}" data-id="{{ conv.id }}">
+                    <span class="conv-title">{{ conv.title }}</span>
+                    <button class="delete-btn" data-id="{{ conv.id }}">×</button>
+                </div>
+                {% endfor %}
+            </div>
+        </aside>
+
+        <main class="chat-area">
+            <div class="chat-header">
+                <h2 id="chat-title">AI 智能助手</h2>
+                <select id="model-selector" class="model-selector"></select>
+                <button id="interrupt-btn" class="interrupt-btn" style="display:none;">⏹ 打断</button>
+            </div>
+
+            <div class="messages-container" id="messages-container">
+                <div class="welcome-message">
+                    <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
+                    <p class="hint">支持工具调用 · 流式输出 · 上下文压缩</p>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <div class="input-wrapper">
+                    <textarea id="message-input" placeholder="输入消息... (Enter发送, Shift+Enter换行)" rows="1"></textarea>
+                    <button id="send-btn" class="send-btn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 2L11 13M22 2L15 22L11 13L2 9L22 2Z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+</body>
+</html>
