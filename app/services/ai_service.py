@@ -1,6 +1,7 @@
 import json
 from openai import OpenAI
 from flask import current_app
+from langsmith import traceable
 from app.services.tool_service import TOOLS, execute_tool
 
 
@@ -13,6 +14,7 @@ class AIService:
         )
         self.model = model or current_app.config["OPENAI_MODEL"]
 
+    @traceable(name="chat_stream_response", run_type="llm")
     def stream_response(self, messages, on_chunk=None, on_tool_call=None, stop_event=None):
         full_content = ""
         tool_calls_accumulator = {}
@@ -89,6 +91,7 @@ class AIService:
             full_content = ""
             tool_calls_accumulator = {}
 
+    @traceable(name="chat_sync_complete", run_type="llm")
     def sync_complete(self, prompt):
         response = self.client.chat.completions.create(
             model=self.model,

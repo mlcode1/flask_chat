@@ -1,3 +1,4 @@
+from langsmith import traceable
 from app.extensions import db
 from app.models import Conversation, Message
 
@@ -10,6 +11,7 @@ class ContextService:
     def count_tokens(self, text):
         return len(text)
 
+    @traceable(name="build_chat_context")
     def build_context(self, conversation_id):
         conversation = db.session.get(Conversation, conversation_id)
         if not conversation:
@@ -48,6 +50,7 @@ class ContextService:
         total_tokens = sum(self.count_tokens(m.content or "") for m in messages)
         return total_tokens > self.max_tokens * 1.5
 
+    @traceable(name="compress_context")
     def compress_context(self, conversation_id, ai_service):
         conversation = db.session.get(Conversation, conversation_id)
         if not conversation:

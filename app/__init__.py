@@ -1,5 +1,10 @@
 from flask import Flask
 from flask_cors import CORS
+from dotenv import load_dotenv
+
+# 加载环境变量（确保 LangSmith 等配置在任何其他导入前加载）
+load_dotenv()
+
 from app.config import Config
 from app.extensions import db
 from app.routes.chat import chat_bp

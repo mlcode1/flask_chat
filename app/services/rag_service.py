@@ -1,6 +1,7 @@
 import io
 from openai import OpenAI
 from flask import current_app
+from langsmith import traceable
 from app.extensions import db
 from app.models import Document, DocumentChunk
 
@@ -86,6 +87,7 @@ def get_embeddings(texts):
     return [item.embedding for item in response.data]
 
 
+@traceable(name="rag_process_and_store")
 def process_and_store(file_storage):
     filename = file_storage.filename
     ext = filename.rsplit(".", 1)[1].lower()
@@ -121,6 +123,7 @@ def process_and_store(file_storage):
     return doc
 
 
+@traceable(name="rag_search")
 def search(query, top_k=None):
     if top_k is None:
         top_k = current_app.config["RAG_TOP_K"]

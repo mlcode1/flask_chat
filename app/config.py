@@ -21,3 +21,8 @@ class Config:
     RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "uploads")
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", str(50 * 1024 * 1024)))
+    # LangSmith
+    LANGCHAIN_TRACING_V2 = os.getenv("LANGCHAIN_TRACING_V2", "false")
+    LANGCHAIN_PROJECT = os.getenv("LANGCHAIN_PROJECT", "flask_chat")
+    LANGCHAIN_API_KEY = os.getenv("LANGCHAIN_API_KEY", "")
+    LANGCHAIN_ENDPOINT = os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
