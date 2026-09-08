@@ -26,6 +26,7 @@ class Message(db.Model):
     tool_calls = db.Column(db.JSON, default=list)
     tool_call_id = db.Column(db.String(100), nullable=True)
     interrupted = db.Column(db.Boolean, default=False)
+    verification = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 

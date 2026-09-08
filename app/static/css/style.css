@@ -158,6 +158,149 @@ body {
     border-color: var(--accent);
 }
 
+/* Verify Toggle Switch */
+.verify-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary);
+    user-select: none;
+}
+
+.verify-toggle input {
+    display: none;
+}
+
+.toggle-slider {
+    width: 36px;
+    height: 20px;
+    background: #ccc;
+    border-radius: 10px;
+    position: relative;
+    transition: background 0.3s;
+}
+
+.toggle-slider::after {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    background: white;
+    border-radius: 50%;
+    top: 2px;
+    left: 2px;
+    transition: transform 0.3s;
+}
+
+.verify-toggle input:checked + .toggle-slider {
+    background: var(--accent);
+}
+
+.verify-toggle input:checked + .toggle-slider::after {
+    transform: translateX(16px);
+}
+
+.toggle-label {
+    font-size: 13px;
+}
+
+/* Verification Result */
+.verification-result {
+    margin-top: 12px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    border-left: 4px solid;
+}
+
+.verification-result.verify-pass {
+    background: #f0fdf4;
+    border-left-color: #22c55e;
+    color: #166534;
+}
+
+.verification-result.verify-fail {
+    background: #fef2f2;
+    border-left-color: var(--danger);
+    color: #991b1b;
+}
+
+.verification-result.verify-error {
+    background: #fffbeb;
+    border-left-color: #f59e0b;
+    color: #92400e;
+}
+
+.verification-result .verify-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.verification-result .verify-confidence {
+    font-size: 11px;
+    opacity: 0.7;
+    margin-left: auto;
+}
+
+.verification-result .verify-explanation {
+    margin-top: 4px;
+}
+
+.verification-result .verify-issues {
+    margin-top: 6px;
+    padding-left: 16px;
+    font-size: 12px;
+}
+
+.verification-result .verify-issues li {
+    margin-bottom: 2px;
+}
+
+.verifying-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.verifying-indicator .dot-loader {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.verify-btn {
+    margin-top: 8px;
+    padding: 4px 12px;
+    font-size: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: white;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.verify-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
 .interrupt-btn {
     padding: 8px 16px;
     background: var(--danger);

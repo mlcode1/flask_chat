@@ -5,6 +5,7 @@ from app.extensions import db
 from app.models import Conversation, Message
 from app.services.ai_service import AIService
 from app.services.context_service import ContextService
+from app.services.verifier_service import VerifierService
 from app.middleware import AI_DISCLAIMER
 
 chat_bp = Blueprint("chat", __name__)
@@ -26,6 +27,28 @@ def get_models():
     })
 
 
+@chat_bp.route("/api/config/verify")
+def get_verify_config():
+    """获取验证功能配置"""
+    return jsonify({
+        "enabled": current_app.config["VERIFY_ENABLED"],
+        "model": current_app.config.get("VERIFY_MODEL", ""),
+    })
+
+
+@chat_bp.route("/api/config/verify", methods=["POST"])
+def update_verify_config():
+    """动态更新验证功能开关"""
+    data = request.get_json()
+    enabled = data.get("enabled")
+    if enabled is not None:
+        current_app.config["VERIFY_ENABLED"] = bool(enabled)
+    return jsonify({
+        "enabled": current_app.config["VERIFY_ENABLED"],
+        "model": current_app.config.get("VERIFY_MODEL", ""),
+    })
+
+
 @chat_bp.route("/api/conversations", methods=["POST"])
 def create_conversation():
     conv = Conversation(title="新对话")
@@ -42,6 +65,7 @@ def get_messages(cid):
         "role": m.role,
         "content": m.content,
         "interrupted": m.interrupted,
+        "verification": m.verification,
         "created_at": m.created_at.isoformat(),
     } for m in messages])
 
@@ -87,7 +111,11 @@ def chat(cid):
                     break
                 yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
 
-            final_content = full + AI_DISCLAIMER
+            # 避免重复添加 disclaimer：如果 AI 输出已包含「消息来源于大模型返回」则不再附加
+            if "消息来源于大模型返回" in full:
+                final_content = full
+            else:
+                final_content = full + AI_DISCLAIMER
             msg = db.session.get(Message, msg_id)
             msg.content = final_content
             if stop_event.is_set():
@@ -98,7 +126,24 @@ def chat(cid):
             conv.updated_at = db.func.now()
             db.session.commit()
 
-            yield f"data: {json.dumps({'done': True, 'content': final_content}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'done': True, 'content': final_content, 'message_id': msg_id}, ensure_ascii=False)}\n\n"
+
+            # 如果验证开关打开且消息未被中断，自动触发验证
+            if current_app.config["VERIFY_ENABLED"] and not stop_event.is_set():
+                yield f"data: {json.dumps({'verifying': True}, ensure_ascii=False)}\n\n"
+                try:
+                    verifier = VerifierService()
+                    verify_result = verifier.verify_answer(
+                        question=user_content,
+                        answer=final_content,
+                    )
+                    msg = db.session.get(Message, msg_id)
+                    msg.verification = verify_result
+                    db.session.commit()
+                    yield f"data: {json.dumps({'verified': verify_result}, ensure_ascii=False)}\n\n"
+                except Exception as verify_err:
+                    yield f"data: {json.dumps({'verified': {'error': str(verify_err)}}, ensure_ascii=False)}\n\n"
+
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
         finally:
@@ -118,6 +163,31 @@ def interrupt(cid):
         event.set()
         return jsonify({"status": "interrupted"})
     return jsonify({"status": "no_active_stream"}), 404
+
+
+@chat_bp.route("/api/conversations/<int:cid>/messages/<int:mid>/verify", methods=["POST"])
+def verify_message(cid, mid):
+    """手动触发验证某条消息"""
+    msg = db.session.get(Message, mid)
+    if not msg or msg.conversation_id != cid:
+        return jsonify({"error": "消息不存在"}), 404
+    if msg.role != "assistant":
+        return jsonify({"error": "只能验证助手消息"}), 400
+
+    # 找到对应的用户问题
+    prev_msg = Message.query.filter_by(
+        conversation_id=cid, role="user"
+    ).filter(Message.id < mid).order_by(Message.id.desc()).first()
+    question = prev_msg.content if prev_msg else ""
+
+    try:
+        verifier = VerifierService()
+        result = verifier.verify_answer(question=question, answer=msg.content)
+        msg.verification = result
+        db.session.commit()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @chat_bp.route("/api/conversations/<int:cid>", methods=["DELETE"])

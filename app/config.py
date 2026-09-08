@@ -26,3 +26,6 @@ class Config:
     LANGCHAIN_PROJECT = os.getenv("LANGCHAIN_PROJECT", "flask_chat")
     LANGCHAIN_API_KEY = os.getenv("LANGCHAIN_API_KEY", "")
     LANGCHAIN_ENDPOINT = os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
+    # Answer Verification
+    VERIFY_ENABLED = os.getenv("VERIFY_ENABLED", "false").lower() == "true"
+    VERIFY_MODEL = os.getenv("VERIFY_MODEL", "")

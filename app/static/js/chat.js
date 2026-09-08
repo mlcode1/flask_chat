@@ -8,13 +8,16 @@
     const modelSelector = document.getElementById("model-selector");
     const fileUpload = document.getElementById("file-upload");
     const kbDocList = document.getElementById("kb-doc-list");
+    const verifySwitch = document.getElementById("verify-switch");
 
     let currentConvId = null;
     let isStreaming = false;
     let currentAbortController = null;
+    let verifyEnabled = false;
 
     loadModels();
     loadDocuments();
+    loadVerifyConfig();
 
     const activeConvs = document.querySelectorAll(".conversation-item");
     if (activeConvs.length > 0) {
@@ -43,7 +46,32 @@
         }
     }
 
-    function addMessage(role, content, interrupted) {
+    async function loadVerifyConfig() {
+        try {
+            const res = await fetch("/api/config/verify");
+            const data = await res.json();
+            verifyEnabled = data.enabled;
+            verifySwitch.checked = verifyEnabled;
+        } catch (e) {
+            console.error("加载验证配置失败:", e);
+        }
+    }
+
+    verifySwitch.addEventListener("change", async function() {
+        verifyEnabled = this.checked;
+        try {
+            await fetch("/api/config/verify", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ enabled: verifyEnabled })
+            });
+        } catch (e) {
+            console.error("更新验证配置失败:", e);
+            this.checked = !verifyEnabled;
+        }
+    });
+
+    function addMessage(role, content, interrupted, verification, messageId) {
         const welcome = messagesContainer.querySelector(".welcome-message");
         if (welcome) welcome.remove();
 
@@ -65,6 +93,18 @@
             bubble.appendChild(tag);
         }
 
+        // 渲染验证结果
+        if (verification) {
+            renderVerification(bubble, verification);
+        } else if (role === "assistant" && verifyEnabled && messageId) {
+            // 添加手动验证按钮
+            const verifyBtn = document.createElement("button");
+            verifyBtn.className = "verify-btn";
+            verifyBtn.textContent = "🔍 验证此回答";
+            verifyBtn.onclick = () => manualVerify(messageId, bubble);
+            bubble.appendChild(verifyBtn);
+        }
+
         row.appendChild(avatar);
         row.appendChild(bubble);
         messagesContainer.appendChild(row);
@@ -80,6 +120,70 @@
             .replace(/\n/g, "<br>")
             .replace(/---/g, "<hr>")
             .replace(/\*(.*?)\*/g, "<em>$1</em>");
+    }
+
+    function renderVerification(bubble, verification) {
+        const container = document.createElement("div");
+        container.className = "verification-result";
+
+        if (verification.error) {
+            container.classList.add("verify-error");
+            container.innerHTML = `
+                <div class="verify-header">
+                    <span>⚠️ 验证失败</span>
+                </div>
+                <div class="verify-explanation">${verification.error}</div>
+            `;
+        } else if (verification.is_correct === true) {
+            container.classList.add("verify-pass");
+            container.innerHTML = `
+                <div class="verify-header">
+                    <span>✅ 验证通过</span>
+                    <span class="verify-confidence">置信度: ${(verification.confidence * 100).toFixed(0)}%</span>
+                </div>
+                <div class="verify-explanation">${verification.explanation}</div>
+            `;
+        } else {
+            container.classList.add("verify-fail");
+            const issuesHtml = verification.issues && verification.issues.length > 0
+                ? `<ul class="verify-issues">${verification.issues.map(i => `<li>${i}</li>`).join("")}</ul>`
+                : "";
+            container.innerHTML = `
+                <div class="verify-header">
+                    <span>❌ 验证未通过</span>
+                    <span class="verify-confidence">置信度: ${(verification.confidence * 100).toFixed(0)}%</span>
+                </div>
+                <div class="verify-explanation">${verification.explanation}</div>
+                ${issuesHtml}
+            `;
+        }
+
+        bubble.appendChild(container);
+    }
+
+    async function manualVerify(messageId, bubble) {
+        const btn = bubble.querySelector(".verify-btn");
+        if (btn) btn.remove();
+
+        const indicator = document.createElement("div");
+        indicator.className = "verifying-indicator";
+        indicator.innerHTML = `<span class="dot-loader"></span><span>正在验证...</span>`;
+        bubble.appendChild(indicator);
+
+        try {
+            const res = await fetch(`/api/conversations/${currentConvId}/messages/${messageId}/verify`, {
+                method: "POST"
+            });
+            const verification = await res.json();
+            indicator.remove();
+            renderVerification(bubble, verification);
+        } catch (e) {
+            indicator.remove();
+            const errorDiv = document.createElement("div");
+            errorDiv.className = "verification-result verify-error";
+            errorDiv.innerHTML = `<div class="verify-header"><span>⚠️ 验证失败</span></div><div class="verify-explanation">${e.message}</div>`;
+            bubble.appendChild(errorDiv);
+        }
     }
 
     function createStreamingBubble() {
@@ -120,7 +224,7 @@
                     </div>`;
                 return;
             }
-            messages.forEach(m => addMessage(m.role, m.content, m.interrupted));
+            messages.forEach(m => addMessage(m.role, m.content, m.interrupted, m.verification, m.id));
         } catch (e) {
             console.error("加载消息失败:", e);
         }
@@ -146,6 +250,7 @@
 
         const bubble = createStreamingBubble();
         let fullContent = "";
+        let currentMessageId = null;
 
         currentAbortController = new AbortController();
 
@@ -187,6 +292,26 @@
                             const cursor = bubble.querySelector(".typing-cursor");
                             if (cursor) cursor.remove();
                             bubble.innerHTML = formatContent(data.content);
+                            // 保存消息ID用于后续验证
+                            currentMessageId = data.message_id;
+                        }
+
+                        if (data.verifying) {
+                            // 显示验证中指示器
+                            const indicator = document.createElement("div");
+                            indicator.className = "verifying-indicator";
+                            indicator.id = "current-verifying";
+                            indicator.innerHTML = `<span class="dot-loader"></span><span>正在验证回答...</span>`;
+                            bubble.appendChild(indicator);
+                            scrollToBottom();
+                        }
+
+                        if (data.verified) {
+                            // 验证完成，移除指示器并显示结果
+                            const indicator = document.getElementById("current-verifying");
+                            if (indicator) indicator.remove();
+                            renderVerification(bubble, data.verified);
+                            scrollToBottom();
                         }
 
                         if (data.error) {
@@ -210,6 +335,15 @@
             sendBtn.disabled = false;
             interruptBtn.style.display = "none";
             currentAbortController = null;
+
+            // 如果验证开关打开且消息未被中断，添加手动验证按钮
+            if (verifyEnabled && currentMessageId && !bubble.querySelector(".verification-result") && !bubble.querySelector(".verifying-indicator")) {
+                const verifyBtn = document.createElement("button");
+                verifyBtn.className = "verify-btn";
+                verifyBtn.textContent = "🔍 验证此回答";
+                verifyBtn.onclick = () => manualVerify(currentMessageId, bubble);
+                bubble.appendChild(verifyBtn);
+            }
         }
     }
 

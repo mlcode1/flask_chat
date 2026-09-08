@@ -39,6 +39,11 @@
             <div class="chat-header">
                 <h2 id="chat-title">AI 智能助手</h2>
                 <select id="model-selector" class="model-selector"></select>
+                <label class="verify-toggle" title="开启后，AI 回答将自动经过另一个 Agent 验证">
+                    <input type="checkbox" id="verify-switch">
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">验证</span>
+                </label>
                 <button id="interrupt-btn" class="interrupt-btn" style="display:none;">⏹ 打断</button>
             </div>
 
