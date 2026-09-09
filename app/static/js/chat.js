@@ -100,7 +100,7 @@
             // 添加手动验证按钮
             const verifyBtn = document.createElement("button");
             verifyBtn.className = "verify-btn";
-            verifyBtn.textContent = "🔍 验证此回答";
+            verifyBtn.textContent = "🔍 结果验证";
             verifyBtn.onclick = () => manualVerify(messageId, bubble);
             bubble.appendChild(verifyBtn);
         }
@@ -123,38 +123,36 @@
     }
 
     function renderVerification(bubble, verification) {
+        // 跳过（无需校验或异常）时，不展示任何验证卡片
+        if (!verification || verification.status === "skipped") {
+            return;
+        }
+
         const container = document.createElement("div");
         container.className = "verification-result";
 
-        if (verification.error) {
-            container.classList.add("verify-error");
-            container.innerHTML = `
-                <div class="verify-header">
-                    <span>⚠️ 验证失败</span>
-                </div>
-                <div class="verify-explanation">${verification.error}</div>
-            `;
-        } else if (verification.is_correct === true) {
-            container.classList.add("verify-pass");
-            container.innerHTML = `
-                <div class="verify-header">
-                    <span>✅ 验证通过</span>
-                    <span class="verify-confidence">置信度: ${(verification.confidence * 100).toFixed(0)}%</span>
-                </div>
-                <div class="verify-explanation">${verification.explanation}</div>
-            `;
-        } else {
+        if (verification.status === "failed" || verification.is_correct === false) {
             container.classList.add("verify-fail");
             const issuesHtml = verification.issues && verification.issues.length > 0
                 ? `<ul class="verify-issues">${verification.issues.map(i => `<li>${i}</li>`).join("")}</ul>`
                 : "";
             container.innerHTML = `
                 <div class="verify-header">
-                    <span>❌ 验证未通过</span>
+                    <span>❌ 结果验证未通过</span>
                     <span class="verify-confidence">置信度: ${(verification.confidence * 100).toFixed(0)}%</span>
                 </div>
-                <div class="verify-explanation">${verification.explanation}</div>
+                <div class="verify-explanation">${verification.explanation || ""}</div>
                 ${issuesHtml}
+            `;
+        } else {
+            // verified / 通过
+            container.classList.add("verify-pass");
+            container.innerHTML = `
+                <div class="verify-header">
+                    <span>✅ 结果验证通过</span>
+                    <span class="verify-confidence">置信度: ${(verification.confidence * 100).toFixed(0)}%</span>
+                </div>
+                <div class="verify-explanation">${verification.explanation || "回答内容合理"}</div>
             `;
         }
 
@@ -167,7 +165,7 @@
 
         const indicator = document.createElement("div");
         indicator.className = "verifying-indicator";
-        indicator.innerHTML = `<span class="dot-loader"></span><span>正在验证...</span>`;
+        indicator.innerHTML = `<span class="dot-loader"></span><span>正在结果验证...</span>`;
         bubble.appendChild(indicator);
 
         try {
@@ -176,13 +174,11 @@
             });
             const verification = await res.json();
             indicator.remove();
+            // skipped 状态（异常 / 无需校验）静默处理，不显示任何卡片
             renderVerification(bubble, verification);
         } catch (e) {
+            // 网络错误等异常也静默处理
             indicator.remove();
-            const errorDiv = document.createElement("div");
-            errorDiv.className = "verification-result verify-error";
-            errorDiv.innerHTML = `<div class="verify-header"><span>⚠️ 验证失败</span></div><div class="verify-explanation">${e.message}</div>`;
-            bubble.appendChild(errorDiv);
         }
     }
 
@@ -251,6 +247,7 @@
         const bubble = createStreamingBubble();
         let fullContent = "";
         let currentMessageId = null;
+        let verificationStatus = null; // "verified" | "failed" | "skipped" | null
 
         currentAbortController = new AbortController();
 
@@ -301,7 +298,7 @@
                             const indicator = document.createElement("div");
                             indicator.className = "verifying-indicator";
                             indicator.id = "current-verifying";
-                            indicator.innerHTML = `<span class="dot-loader"></span><span>正在验证回答...</span>`;
+                            indicator.innerHTML = `<span class="dot-loader"></span><span>正在进行结果验证...</span>`;
                             bubble.appendChild(indicator);
                             scrollToBottom();
                         }
@@ -310,6 +307,7 @@
                             // 验证完成，移除指示器并显示结果
                             const indicator = document.getElementById("current-verifying");
                             if (indicator) indicator.remove();
+                            verificationStatus = data.verified.status || "skipped";
                             renderVerification(bubble, data.verified);
                             scrollToBottom();
                         }
@@ -336,11 +334,11 @@
             interruptBtn.style.display = "none";
             currentAbortController = null;
 
-            // 如果验证开关打开且消息未被中断，添加手动验证按钮
-            if (verifyEnabled && currentMessageId && !bubble.querySelector(".verification-result") && !bubble.querySelector(".verifying-indicator")) {
+            // 验证开关打开 + 没有验证结果（verified/failed/skipped 都算）→ 显示手动验证按钮
+            if (verifyEnabled && currentMessageId && !verificationStatus && !bubble.querySelector(".verifying-indicator")) {
                 const verifyBtn = document.createElement("button");
                 verifyBtn.className = "verify-btn";
-                verifyBtn.textContent = "🔍 验证此回答";
+                verifyBtn.textContent = "🔍 结果验证";
                 verifyBtn.onclick = () => manualVerify(currentMessageId, bubble);
                 bubble.appendChild(verifyBtn);
             }

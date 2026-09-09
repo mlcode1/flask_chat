@@ -6,7 +6,7 @@
 
 ### 项目简介
 
-Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模型切换、流式输出、工具调用、上下文压缩、RAG（检索增强生成）知识库系统、LangSmith 全链路监控以及 AI 回答自动验证。数据存储在 PostgreSQL 中，前端采用原生 JavaScript 实现单页应用。
+Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模型切换、流式输出、工具调用、上下文压缩、RAG（检索增强生成）知识库系统、LangSmith 全链路监控以及 AI 回答结果验证。数据存储在 PostgreSQL 中，前端采用原生 JavaScript 实现单页应用。
 
 ### 功能特性
 
@@ -16,7 +16,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 - **RAG 知识检索** — 上传文档后，AI 可通过工具调用自动检索知识库回答问题
 - **上下文压缩** — 对话过长时自动压缩历史消息，节省 Token 用量
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
-- **回答验证（Answer Verification）** — 可选开关，开启后由另一个 Agent 对 AI 回答进行事实、逻辑、完整性与清晰度的多维度验证，支持自动验证与手动验证
+- **结果验证（Result Verification）** — 可选开关，开启后由另一个 Agent 对 AI 回答进行事实、逻辑、完整性与清晰度的多维度验证，支持自动验证与手动验证
 - **LangSmith 监控** — 通过 LangSmith 实现 LLM 调用、RAG 检索、上下文构建等关键流程的全链路可观测
 
 ### 技术栈
@@ -48,13 +48,13 @@ flask_chat/
     ├── models.py             # 数据模型
     ├── middleware.py          # 中间件
     ├── routes/
-    │   ├── chat.py           # 对话、验证配置、手动验证路由
+    │   ├── chat.py           # 对话、结果验证配置、手动验证路由
     │   └── rag.py            # RAG 知识库路由
     ├── services/
     │   ├── ai_service.py     # AI 服务（流式输出 + 工具调用循环）
     │   ├── context_service.py # 上下文管理（窗口裁剪 + 压缩）
     │   ├── rag_service.py    # RAG 服务（解析/分块/嵌入/存储/检索）
-    │   ├── verifier_service.py # 回答验证服务（独立 Agent 验证）
+    │   ├── verifier_service.py # 结果验证服务（独立 Agent 验证）
     │   └── tool_service.py   # 工具定义与执行
     ├── static/
     │   ├── css/style.css
@@ -118,7 +118,7 @@ cp .env.example .env
 | `CHUNK_SIZE` | 文档分块大小（字符数） | `500` |
 | `CHUNK_OVERLAP` | 分块重叠大小 | `50` |
 | `RAG_TOP_K` | 检索返回的文档块数量 | `5` |
-| `VERIFY_ENABLED` | 是否启用回答验证 | `false` |
+| `VERIFY_ENABLED` | 是否启用结果验证 | `false` |
 | `VERIFY_MODEL` | 验证 Agent 使用的模型（留空则与主模型一致） | 空 |
 | `LANGCHAIN_TRACING_V2` | 是否启用 LangSmith 追踪 | `true` |
 | `LANGCHAIN_PROJECT` | LangSmith 项目名 | `flask_chat` |
@@ -154,7 +154,7 @@ gunicorn run:app -w 4 -b 0.0.0.0:8080
 - **打断生成** — AI 回复时点击「打断」按钮停止生成
 - **知识库** — 在左侧栏点击「+」上传文档（支持 `.txt`、`.md`、`.pdf`、`.docx`），上传后 AI 会在需要时自动检索知识库
 - **删除文档** — 在左侧栏文档列表中点击 `×` 删除已上传的文档
-- **回答验证** — 顶部打开「验证」开关后，AI 回答完成后会自动触发验证；也可点击消息下方的「🔍 验证此回答」按钮对历史回答手动验证。验证结果以卡片形式展示，包括通过/未通过、置信度、问题点等
+- **结果验证** — 顶部打开「结果验证」开关后，AI 回答完成后会自动触发验证；也可点击消息下方的「🔍 结果验证」按钮对历史回答手动验证。验证结果以卡片形式展示，包括通过/未通过、置信度、问题点等
 - **LangSmith 监控** — 启动应用后，在 [LangSmith](https://smith.langchain.com) 对应项目下查看 LLM 调用、RAG 检索、上下文构建的全链路追踪
 
 ### API 接口
@@ -163,8 +163,8 @@ gunicorn run:app -w 4 -b 0.0.0.0:8080
 |------|------|------|
 | `GET` | `/` | 主页 |
 | `GET` | `/api/models` | 获取可用模型列表 |
-| `GET` | `/api/config/verify` | 获取回答验证配置 |
-| `POST` | `/api/config/verify` | 更新回答验证开关（请求体：`{"enabled": true/false}`） |
+| `GET` | `/api/config/verify` | 获取结果验证配置 |
+| `POST` | `/api/config/verify` | 更新结果验证开关（请求体：`{"enabled": true/false}`） |
 | `POST` | `/api/conversations` | 创建新对话 |
 | `GET` | `/api/conversations/<id>/messages` | 获取对话消息 |
 | `POST` | `/api/conversations/<id>/chat` | 发送消息并流式获取回复（SSE） |
@@ -204,7 +204,7 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **RAG Knowledge Base** — Upload documents and let the AI automatically search the knowledge base when answering questions
 - **Context Compression** — Automatically compresses older messages when conversations get too long, saving token usage
 - **Stream Interruption** — Stop AI generation at any time
-- **Answer Verification** — Optional toggle that runs a second agent to validate every AI answer for accuracy, logic, completeness, and clarity. Supports both auto-verification and manual on-demand verification
+- **Result Verification** — Optional toggle that runs a second agent to validate every AI answer for accuracy, logic, completeness, and clarity. Supports both auto-verification and manual on-demand verification
 - **LangSmith Observability** — End-to-end tracing for LLM calls, RAG retrieval, and context building via LangSmith
 
 ### Tech Stack
@@ -236,13 +236,13 @@ flask_chat/
     ├── models.py             # Database models
     ├── middleware.py          # Middleware
     ├── routes/
-    │   ├── chat.py           # Chat, verify config, and manual verify routes
+    │   ├── chat.py           # Chat, result-verify config, and manual verify routes
     │   └── rag.py            # RAG knowledge base routes
     ├── services/
     │   ├── ai_service.py     # AI service (streaming + tool call loop)
     │   ├── context_service.py # Context management (window + compression)
     │   ├── rag_service.py    # RAG service (parse/chunk/embed/store/retrieve)
-    │   ├── verifier_service.py # Answer verification service (second-agent validation)
+    │   ├── verifier_service.py # Result verification service (second-agent validation)
     │   └── tool_service.py   # Tool definitions and execution
     ├── static/
     │   ├── css/style.css
@@ -306,7 +306,7 @@ Key configuration options:
 | `CHUNK_SIZE` | Document chunk size (characters) | `500` |
 | `CHUNK_OVERLAP` | Chunk overlap size | `50` |
 | `RAG_TOP_K` | Number of chunks to retrieve | `5` |
-| `VERIFY_ENABLED` | Enable answer verification | `false` |
+| `VERIFY_ENABLED` | Enable result verification | `false` |
 | `VERIFY_MODEL` | Model used by the verification agent (empty = same as main) | empty |
 | `LANGCHAIN_TRACING_V2` | Enable LangSmith tracing | `true` |
 | `LANGCHAIN_PROJECT` | LangSmith project name | `flask_chat` |
@@ -342,7 +342,7 @@ gunicorn run:app -w 4 -b 0.0.0.0:8080
 - **Interrupt** — Click the "Interrupt" button during AI generation to stop it
 - **Knowledge Base** — Click "+" in the sidebar to upload documents (supports `.txt`, `.md`, `.pdf`, `.docx`). The AI will automatically search the knowledge base when needed
 - **Delete Documents** — Click "×" next to a document in the sidebar to remove it
-- **Answer Verification** — Toggle the "Verify" switch in the header to auto-verify every AI answer. You can also click the "🔍 Verify this answer" button on any message for manual on-demand verification. Results are shown as a card with pass/fail, confidence, and issues
+- **Result Verification** — Toggle the "Result Verification" switch in the header to auto-verify every AI answer. You can also click the "🔍 Verify" button on any message for manual on-demand verification. Results are shown as a card with pass/fail, confidence, and issues
 - **LangSmith Monitoring** — After launching, visit [LangSmith](https://smith.langchain.com) to inspect end-to-end traces for LLM calls, RAG retrieval, and context building
 
 ### API Endpoints
@@ -351,8 +351,8 @@ gunicorn run:app -w 4 -b 0.0.0.0:8080
 |--------|------|-------------|
 | `GET` | `/` | Main page |
 | `GET` | `/api/models` | List available models |
-| `GET` | `/api/config/verify` | Get answer verification configuration |
-| `POST` | `/api/config/verify` | Toggle answer verification (`{"enabled": true/false}`) |
+| `GET` | `/api/config/verify` | Get result verification configuration |
+| `POST` | `/api/config/verify` | Toggle result verification (`{"enabled": true/false}`) |
 | `POST` | `/api/conversations` | Create a new conversation |
 | `GET` | `/api/conversations/<id>/messages` | Get messages for a conversation |
 | `POST` | `/api/conversations/<id>/chat` | Send message and stream response (SSE) |

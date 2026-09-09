@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 from flask import Blueprint, render_template, request, jsonify, Response, stream_with_context, current_app
 from app.extensions import db
@@ -7,6 +8,8 @@ from app.services.ai_service import AIService
 from app.services.context_service import ContextService
 from app.services.verifier_service import VerifierService
 from app.middleware import AI_DISCLAIMER
+
+logger = logging.getLogger(__name__)
 
 chat_bp = Blueprint("chat", __name__)
 
@@ -137,12 +140,16 @@ def chat(cid):
                         question=user_content,
                         answer=final_content,
                     )
-                    msg = db.session.get(Message, msg_id)
-                    msg.verification = verify_result
-                    db.session.commit()
+                    # 只有"已校验"的结果才入库；skipped（无需校验/异常）置空
+                    if verify_result.get("status") != "skipped":
+                        msg = db.session.get(Message, msg_id)
+                        msg.verification = verify_result
+                        db.session.commit()
                     yield f"data: {json.dumps({'verified': verify_result}, ensure_ascii=False)}\n\n"
                 except Exception as verify_err:
-                    yield f"data: {json.dumps({'verified': {'error': str(verify_err)}}, ensure_ascii=False)}\n\n"
+                    # 异常走 skipped 通道，不向用户暴露
+                    logger.warning("自动验证异常: %s", verify_err)
+                    yield f"data: {json.dumps({'verified': {'status': 'skipped'}}, ensure_ascii=False)}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
@@ -168,6 +175,10 @@ def interrupt(cid):
 @chat_bp.route("/api/conversations/<int:cid>/messages/<int:mid>/verify", methods=["POST"])
 def verify_message(cid, mid):
     """手动触发验证某条消息"""
+    # 大原则：开关关闭时不进行任何验证（无论自动还是手动）
+    if not current_app.config["VERIFY_ENABLED"]:
+        return jsonify({"status": "skipped", "explanation": "无需校验", "issues": []})
+
     msg = db.session.get(Message, mid)
     if not msg or msg.conversation_id != cid:
         return jsonify({"error": "消息不存在"}), 404
@@ -183,11 +194,15 @@ def verify_message(cid, mid):
     try:
         verifier = VerifierService()
         result = verifier.verify_answer(question=question, answer=msg.content)
-        msg.verification = result
-        db.session.commit()
+        # 只有真正校验过的结果才入库，skipped 不入库
+        if result.get("status") != "skipped":
+            msg.verification = result
+            db.session.commit()
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # 异常静默返回 skipped，不抛 500
+        logger.warning("手动验证异常: %s", e)
+        return jsonify({"status": "skipped", "explanation": "无需校验", "issues": []})
 
 
 @chat_bp.route("/api/conversations/<int:cid>", methods=["DELETE"])
