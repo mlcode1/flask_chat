@@ -9,6 +9,8 @@
     const fileUpload = document.getElementById("file-upload");
     const kbDocList = document.getElementById("kb-doc-list");
     const verifySwitch = document.getElementById("verify-switch");
+    const shareBtn = document.getElementById("share-btn");
+    const exportBtn = document.getElementById("export-btn");
 
     let currentConvId = null;
     let isStreaming = false;
@@ -18,6 +20,7 @@
     loadModels();
     loadDocuments();
     loadVerifyConfig();
+    addDebugButton();
 
     const activeConvs = document.querySelectorAll(".conversation-item");
     if (activeConvs.length > 0) {
@@ -71,7 +74,7 @@
         }
     });
 
-    function addMessage(role, content, interrupted, verification, messageId) {
+    function addMessage(role, content, interrupted, verification, messageId, toolCalls) {
         const welcome = messagesContainer.querySelector(".welcome-message");
         if (welcome) welcome.remove();
 
@@ -105,6 +108,29 @@
             bubble.appendChild(verifyBtn);
         }
 
+        // 为 AI 消息添加反馈按钮
+        if (role === "assistant" && messageId) {
+            const feedbackDiv = document.createElement("div");
+            feedbackDiv.className = "feedback-buttons";
+            feedbackDiv.innerHTML = `
+                <button class="feedback-btn like-btn" data-message-id="${messageId}" data-feedback="like" title="有帮助">👍</button>
+                <button class="feedback-btn dislike-btn" data-message-id="${messageId}" data-feedback="dislike" title="需要改进">👎</button>
+            `;
+            bubble.appendChild(feedbackDiv);
+
+            // 绑定反馈事件
+            feedbackDiv.querySelectorAll('.feedback-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    submitFeedback(this.dataset.messageId, this.dataset.feedback, this);
+                });
+            });
+        }
+
+        // 渲染历史消息中的工具调用
+        if (toolCalls && toolCalls.length > 0) {
+            renderToolCalls(bubble, toolCalls);
+        }
+
         row.appendChild(avatar);
         row.appendChild(bubble);
         messagesContainer.appendChild(row);
@@ -112,15 +138,221 @@
         return bubble;
     }
 
-    function formatContent(text) {
-        return text
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/\n/g, "<br>")
-            .replace(/---/g, "<hr>")
-            .replace(/\*(.*?)\*/g, "<em>$1</em>");
+    // 提交反馈
+    async function submitFeedback(messageId, feedback, btn) {
+        try {
+            const res = await fetch(`/api/messages/${messageId}/feedback`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ feedback })
+            });
+            
+            if (res.ok) {
+                // 高亮选中的按钮
+                const parent = btn.parentElement;
+                parent.querySelectorAll('.feedback-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                
+                // 显示反馈成功提示
+                const toast = document.createElement('div');
+                toast.className = 'feedback-toast';
+                toast.textContent = feedback === 'like' ? '感谢反馈！🎉' : '感谢反馈，我们会改进！';
+                document.body.appendChild(toast);
+                setTimeout(() => toast.remove(), 2000);
+            }
+        } catch (e) {
+            console.error("提交反馈失败:", e);
+        }
     }
+
+    // 配置 Marked.js
+    marked.setOptions({
+        breaks: true,
+        gfm: true,
+        headerIds: false,
+        mangle: false
+    });
+
+    function formatContent(text) {
+        // 使用 Marked.js 渲染 Markdown
+        let html = marked.parse(text);
+        
+        // 为代码块添加语法高亮（简单的颜色标记）
+        html = html.replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, (match, code) => {
+            return `<pre class="code-block"><code>${code}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>`;
+        });
+        
+        // 为行内代码添加样式
+        html = html.replace(/<code>([^<]+)<\/code>/g, '<code class="inline-code">$1</code>');
+        
+        return html;
+    }
+
+    // 工具调用可视化
+    function renderToolCalls(bubble, toolCalls) {
+        const container = document.createElement("div");
+        container.className = "tool-calls-container";
+        
+        const header = document.createElement("div");
+        header.className = "tool-calls-header";
+        header.innerHTML = `<span class="tool-icon">🔧</span><span>工具调用 (${toolCalls.length})</span>`;
+        
+        const toggleBtn = document.createElement("button");
+        toggleBtn.className = "toggle-tool-details";
+        toggleBtn.textContent = "展开";
+        toggleBtn.onclick = () => {
+            const details = container.querySelector(".tool-calls-details");
+            const isHidden = details.style.display === "none";
+            details.style.display = isHidden ? "block" : "none";
+            toggleBtn.textContent = isHidden ? "收起" : "展开";
+        };
+        header.appendChild(toggleBtn);
+        
+        const details = document.createElement("div");
+        details.className = "tool-calls-details";
+        details.style.display = "none";
+        
+        toolCalls.forEach((tc, idx) => {
+            // 兼容 OpenAI 标准格式 {function:{name,arguments}} 和 旧格式 {name,arguments}
+            const fn = tc.function || tc;
+            const name = fn.name || "未知工具";
+            const args = fn.arguments || "";
+            const result = tc._result || tc.result || "";
+            const call = document.createElement("div");
+            call.className = "tool-call-item";
+            call.innerHTML = `
+                <div class="tool-call-name">${escapeHtml(name)}</div>
+                <div class="tool-call-args"><pre>${escapeHtml(args)}</pre></div>
+                ${result ? `<div class="tool-call-result"><pre>${escapeHtml(result)}</pre></div>` : ''}
+            `;
+            details.appendChild(call);
+        });
+        
+        container.appendChild(header);
+        container.appendChild(details);
+        bubble.appendChild(container);
+    }
+    
+    function escapeHtml(text) {
+        const div = document.createElement("div");
+        div.textContent = text;
+        return div.innerHTML;
+    }
+    
+    // 调试面板
+    function showDebugPanel() {
+        let panel = document.getElementById("debug-panel");
+        if (!panel) {
+            panel = document.createElement("div");
+            panel.id = "debug-panel";
+            panel.className = "debug-panel";
+            panel.innerHTML = `
+                <div class="debug-header">
+                    <span>🐛 调试面板</span>
+                    <button class="close-debug" onclick="this.parentElement.parentElement.style.display='none'">×</button>
+                </div>
+                <div class="debug-content">
+                    <div class="debug-section">
+                        <h4>系统状态</h4>
+                        <div id="debug-system-info">加载中...</div>
+                    </div>
+                    <div class="debug-section">
+                        <h4>Token 统计</h4>
+                        <div id="debug-token-stats">暂无数据</div>
+                    </div>
+                    <div class="debug-section">
+                        <h4>缓存状态</h4>
+                        <div id="debug-cache-info">加载中...</div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(panel);
+        } else {
+            panel.style.display = "block";
+        }
+        
+        // 加载调试信息
+        loadDebugInfo();
+    }
+    
+    async function loadDebugInfo() {
+        try {
+            const res = await fetch("/api/health");
+            const data = await res.json();
+            
+            const systemInfo = document.getElementById("debug-system-info");
+            systemInfo.innerHTML = `
+                <div>状态: <span class="${data.status === 'healthy' ? 'status-ok' : 'status-warn'}">${data.status}</span></div>
+                <div>数据库: ${data.database}</div>
+                <div>缓存: ${data.cache}</div>
+                <div>默认模型: ${data.models?.default || '-'}</div>
+                <div>可用模型: ${(data.models?.available || []).join(', ') || '-'}</div>
+                <div>时间: ${data.timestamp}</div>
+            `;
+            
+            const cacheInfo = document.getElementById("debug-cache-info");
+            if (data.cache_stats) {
+                cacheInfo.innerHTML = `
+                    <div>缓存条目: ${data.cache_stats.total_entries}</div>
+                    <div>最大容量: ${data.cache_stats.max_size}</div>
+                `;
+            } else {
+                cacheInfo.textContent = "缓存未启用";
+            }
+
+            // 加载 Token 统计
+            const tokenStatsEl = document.getElementById("debug-token-stats");
+            if (currentConvId) {
+                try {
+                    const statsRes = await fetch(`/api/conversations/${currentConvId}/stats`);
+                    const stats = await statsRes.json();
+                    tokenStatsEl.innerHTML = `
+                        <div class="token-stat-row"><span>总消息数</span><span>${stats.total_messages}</span></div>
+                        <div class="token-stat-row"><span>总 Token</span><span class="token-value">${formatTokenCount(stats.total_tokens)}</span></div>
+                        <div class="token-stat-row"><span>用户 Token</span><span class="token-value user">${formatTokenCount(stats.user_tokens)}</span></div>
+                        <div class="token-stat-row"><span>AI Token</span><span class="token-value ai">${formatTokenCount(stats.assistant_tokens)}</span></div>
+                        ${stats.total_tokens > 0 ? `
+                        <div class="token-bar">
+                            <div class="token-bar-user" style="width:${(stats.user_tokens / stats.total_tokens * 100).toFixed(1)}%" title="用户 ${stats.user_tokens}"></div>
+                            <div class="token-bar-ai" style="width:${(stats.assistant_tokens / stats.total_tokens * 100).toFixed(1)}%" title="AI ${stats.assistant_tokens}"></div>
+                        </div>` : ''}
+                    `;
+                } catch (e) {
+                    tokenStatsEl.textContent = "加载失败";
+                }
+            } else {
+                tokenStatsEl.textContent = "请先选择一个对话";
+            }
+        } catch (e) {
+            console.error("加载调试信息失败:", e);
+        }
+    }
+
+    function formatTokenCount(n) {
+        if (!n) return "0";
+        if (n >= 10000) return (n / 10000).toFixed(1) + "万";
+        if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+        return String(n);
+    }
+    
+    // 添加调试按钮到页面
+    function addDebugButton() {
+        const btn = document.createElement("button");
+        btn.className = "debug-toggle-btn";
+        btn.textContent = "🐛";
+        btn.title = "调试面板";
+        btn.onclick = showDebugPanel;
+        document.body.appendChild(btn);
+    }
+    
+    // 复制代码功能
+    window.copyCode = function(btn) {
+        const code = btn.previousElementSibling.textContent;
+        navigator.clipboard.writeText(code).then(() => {
+            btn.textContent = '已复制';
+            setTimeout(() => btn.textContent = '复制', 2000);
+        });
+    };
 
     function renderVerification(bubble, verification) {
         // 跳过（无需校验或异常）时，不展示任何验证卡片
@@ -220,7 +452,7 @@
                     </div>`;
                 return;
             }
-            messages.forEach(m => addMessage(m.role, m.content, m.interrupted, m.verification, m.id));
+            messages.forEach(m => addMessage(m.role, m.content, m.interrupted, m.verification, m.id, m.tool_calls));
         } catch (e) {
             console.error("加载消息失败:", e);
         }
@@ -282,6 +514,12 @@
                             if (cursor) cursor.remove();
                             bubble.innerHTML = formatContent(fullContent);
                             bubble.appendChild(createCursor());
+                            scrollToBottom();
+                        }
+
+                        if (data.tool_calls) {
+                            // 显示工具调用信息
+                            renderToolCalls(bubble, data.tool_calls);
                             scrollToBottom();
                         }
 
@@ -419,6 +657,97 @@
                 <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
                 <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
             </div>`;
+    });
+
+    shareBtn.addEventListener("click", async function () {
+        if (!currentConvId) {
+            alert("请先选择一个对话");
+            return;
+        }
+        try {
+            const res = await fetch(`/api/conversations/${currentConvId}/share`, { method: "POST" });
+            const data = await res.json();
+            if (data.error) {
+                alert(data.error);
+                return;
+            }
+            const shareUrl = `${window.location.origin}/share/${data.share_token}`;
+            const toast = document.createElement("div");
+            toast.className = "share-toast";
+            toast.innerHTML = `
+                <div class="share-toast-content">
+                    <span class="share-toast-icon">🔗</span>
+                    <div class="share-toast-text">
+                        <div class="share-toast-title">分享链接已生成</div>
+                        <div class="share-toast-url">${shareUrl}</div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 5000);
+            navigator.clipboard.writeText(shareUrl).catch(() => {});
+        } catch (e) {
+            console.error("分享失败:", e);
+            alert("分享失败，请稍后重试");
+        }
+    });
+
+    exportBtn.addEventListener("click", function () {
+        if (!currentConvId) {
+            alert("请先选择一个对话");
+            return;
+        }
+        const existing = document.querySelector(".export-menu");
+        if (existing) {
+            existing.remove();
+            return;
+        }
+        const menu = document.createElement("div");
+        menu.className = "export-menu";
+        menu.innerHTML = `
+            <div class="export-menu-title">导出对话</div>
+            <button class="export-option" data-format="markdown">
+                <span class="export-icon">📝</span>
+                <span>Markdown (.md)</span>
+            </button>
+            <button class="export-option" data-format="json">
+                <span class="export-icon">📊</span>
+                <span>JSON (.json)</span>
+            </button>
+            <button class="export-option" data-format="txt">
+                <span class="export-icon">📄</span>
+                <span>纯文本 (.txt)</span>
+            </button>
+        `;
+        document.body.appendChild(menu);
+        menu.querySelectorAll(".export-option").forEach(btn => {
+            btn.addEventListener("click", async function () {
+                const format = this.dataset.format;
+                try {
+                    const res = await fetch(`/api/conversations/${currentConvId}/export?format=${format}`);
+                    if (!res.ok) throw new Error("导出失败");
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `conversation_${currentConvId}.${format === "markdown" ? "md" : format}`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    menu.remove();
+                } catch (e) {
+                    console.error("导出失败:", e);
+                    alert("导出失败，请稍后重试");
+                }
+            });
+        });
+        setTimeout(() => {
+            document.addEventListener("click", function closeMenu(e) {
+                if (!menu.contains(e.target) && e.target !== exportBtn) {
+                    menu.remove();
+                    document.removeEventListener("click", closeMenu);
+                }
+            });
+        }, 0);
     });
 
     sendBtn.addEventListener("click", sendMessage);
