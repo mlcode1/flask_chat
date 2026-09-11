@@ -105,18 +105,37 @@ body {
     border: none;
     color: var(--text-secondary);
     font-size: 18px;
+    line-height: 1;
     cursor: pointer;
     padding: 0 4px;
     opacity: 0;
     transition: opacity 0.2s, color 0.2s;
 }
 
-.conversation-item:hover .delete-btn {
+.rename-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.2s, color 0.2s;
+}
+
+.conversation-item:hover .delete-btn,
+.conversation-item:hover .rename-btn {
     opacity: 1;
 }
 
 .delete-btn:hover {
     color: var(--danger);
+}
+
+.rename-btn:hover {
+    color: var(--accent);
 }
 
 /* 重命名输入框 */

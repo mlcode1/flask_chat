@@ -609,7 +609,7 @@
         const item = document.createElement("div");
         item.className = "conversation-item active";
         item.dataset.id = id;
-        item.innerHTML = `<span class="conv-title" title="双击重命名">${escapeHtml(title)}</span><button class="delete-btn" data-id="${id}">×</button>`;
+        item.innerHTML = `<span class="conv-title">${escapeHtml(title)}</span><button class="rename-btn" data-id="${id}" title="重命名"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"></path></svg></button><button class="delete-btn" data-id="${id}">×</button>`;
 
         document.querySelectorAll(".conversation-item").forEach(el => el.classList.remove("active"));
         convList.prepend(item);
@@ -619,17 +619,19 @@
     function bindConvEvents(item) {
         item.addEventListener("click", function (e) {
             if (e.target.classList.contains("delete-btn")) return;
-            if (e.target.classList.contains("conv-title") || e.target.classList.contains("rename-input")) return;
+            if (e.target.classList.contains("rename-btn")) return;
+            if (e.target.classList.contains("rename-input")) return; // 重命名输入框内点击不切换
             document.querySelectorAll(".conversation-item").forEach(el => el.classList.remove("active"));
             item.classList.add("active");
             currentConvId = item.dataset.id;
             loadMessages(currentConvId);
         });
 
-        // 双击标题重命名
+        // 点击编辑按钮进入重命名
         const titleEl = item.querySelector(".conv-title");
-        if (titleEl) {
-            titleEl.addEventListener("dblclick", function (e) {
+        const renameBtn = item.querySelector(".rename-btn");
+        if (renameBtn && titleEl) {
+            renameBtn.addEventListener("click", function (e) {
                 e.stopPropagation();
                 startRename(item, titleEl);
             });
