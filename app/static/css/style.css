@@ -96,6 +96,8 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
+    cursor: pointer;
+    user-select: none;
 }
 
 .delete-btn {
@@ -115,6 +117,94 @@ body {
 
 .delete-btn:hover {
     color: var(--danger);
+}
+
+/* 重命名输入框 */
+.rename-input {
+    flex: 1;
+    min-width: 0;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    color: var(--text-sidebar);
+    font-size: 14px;
+    padding: 4px 6px;
+    outline: none;
+}
+
+/* 新建对话弹窗 */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+
+.modal-box {
+    background: var(--bg-chat);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    padding: 22px;
+    width: 320px;
+    max-width: 90vw;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+.modal-title {
+    color: var(--text-primary);
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 14px;
+}
+
+.modal-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 14px;
+    padding: 10px 12px;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.modal-input:focus {
+    border-color: var(--accent);
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.modal-btn {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: none;
+    font-size: 14px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.modal-btn:hover {
+    opacity: 0.85;
+}
+
+.modal-cancel {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-secondary);
+}
+
+.modal-confirm {
+    background: var(--accent);
+    color: #fff;
 }
 
 /* Chat Area */

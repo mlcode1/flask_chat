@@ -18,6 +18,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 - **本地模型支持** — 通过 Ollama 可直接使用本地部署的大语言模型和 Embedding 模型，无需任何云服务；Embedding 也可接入第三方服务
 - **多轮记忆与上下文压缩** — 结构化摘要 + 长期记忆，跨轮次保留关键信息；对话过长时自动压缩历史消息，节省 Token 用量
 - **结果验证（Result Verification）** — 可选开关，开启后由另一个 Agent 对 AI 回答进行事实、逻辑、完整性与清晰度的多维度验证，支持自动验证与手动验证
+- **对话命名与重命名** — 新建对话时弹窗输入标题（留空则默认）；侧边栏对话项双击标题即可随时重命名
 - **协作与分享** — 一键生成分享链接（`/share/<token>` 公开查看页）、对话导出（Markdown / JSON / TXT）
 - **响应缓存** — 相同问题 + 相同上下文命中缓存时直接返回，提升响应速度
 - **错误恢复** — 自动重试（指数退避）、主模型失败降级到备用模型、健康检查接口
@@ -287,6 +288,8 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 ### 使用说明
 
 - **对话** — 在输入框输入消息，按 Enter 发送，Shift+Enter 换行
+- **新建对话** — 点击左侧「+ 新对话」会弹出标题输入框，可直接命名（留空则用默认标题，发消息后由 AI 自动生成标题）
+- **重命名对话** — 在左侧对话列表中，双击某条对话的标题即可原地重命名（回车或点击别处保存，Esc 取消）
 - **切换模型** — 在顶部下拉框选择不同的大语言模型
 - **打断生成** — AI 回复时点击「打断」按钮停止生成
 - **知识库** — 在左侧栏点击「+」上传文档（支持 `.txt`、`.md`、`.pdf`、`.docx`），上传后 AI 会在需要时自动检索知识库
@@ -306,7 +309,8 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 |------|------|------|
 | `GET` | `/` | 主页 |
 | `GET` | `/api/models` | 获取可用模型列表 |
-| `POST` | `/api/conversations` | 创建新对话 |
+| `POST` | `/api/conversations` | 创建新对话（请求体可选 `{"title": "..."}`） |
+| `PATCH` | `/api/conversations/<id>` | 重命名对话（请求体：`{"title": "..."}`） |
 | `GET` | `/api/conversations/<id>/messages` | 获取对话消息（含 `tool_calls`、`token_count` 等） |
 | `POST` | `/api/conversations/<id>/chat` | 发送消息并流式获取回复（SSE） |
 | `POST` | `/api/conversations/<id>/interrupt` | 打断当前对话生成 |
@@ -386,6 +390,7 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Local Model Support** — Run both LLM and Embedding models locally via Ollama, no cloud service required; embedding can also use a third-party service
 - **Multi-turn Memory & Context Compression** — Structured summarization + long-term memory across turns; automatically compresses older messages when conversations get too long
 - **Result Verification** — Optional toggle that runs a second agent to validate every AI answer for accuracy, logic, completeness, and clarity. Supports both auto-verification and manual on-demand verification
+- **Conversation Naming & Renaming** — Enter a title when creating a new conversation (leave blank for default); double-click any conversation title in the sidebar to rename it at any time
 - **Sharing & Export** — One-click share links (`/share/<token>` public view) and conversation export (Markdown / JSON / TXT)
 - **Response Cache** — Returns cached results when the same question + context is repeated, improving response speed
 - **Error Recovery** — Automatic retry with exponential backoff, fallback to a backup model, and a health check endpoint
@@ -655,6 +660,8 @@ RAG functionality (document parsing, chunking, embedding, hybrid search) does no
 ### Usage
 
 - **Chat** — Type a message in the input box, press Enter to send, Shift+Enter for new line
+- **New Conversation** — Click "+ New Chat" to open a title dialog; enter a name or leave blank for the default (an AI-generated title is applied after the first message)
+- **Rename Conversation** — Double-click a conversation title in the sidebar to rename it inline (Enter or click away to save, Esc to cancel)
 - **Switch Models** — Select a different LLM from the dropdown at the top
 - **Interrupt** — Click the "Interrupt" button during AI generation to stop it
 - **Knowledge Base** — Click "+" in the sidebar to upload documents (supports `.txt`, `.md`, `.pdf`, `.docx`). The AI will automatically search the knowledge base when needed
@@ -674,7 +681,8 @@ RAG functionality (document parsing, chunking, embedding, hybrid search) does no
 |--------|------|-------------|
 | `GET` | `/` | Main page |
 | `GET` | `/api/models` | List available models |
-| `POST` | `/api/conversations` | Create a new conversation |
+| `POST` | `/api/conversations` | Create a new conversation (optional body `{"title": "..."}`) |
+| `PATCH` | `/api/conversations/<id>` | Rename a conversation (body `{"title": "..."}`) |
 | `GET` | `/api/conversations/<id>/messages` | Get messages (with `tool_calls`, `token_count`, etc.) |
 | `POST` | `/api/conversations/<id>/chat` | Send message and stream response (SSE) |
 | `POST` | `/api/conversations/<id>/interrupt` | Interrupt active generation |

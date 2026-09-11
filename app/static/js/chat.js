@@ -463,7 +463,11 @@
         if (!content || isStreaming) return;
 
         if (!currentConvId) {
-            const res = await fetch("/api/conversations", { method: "POST" });
+            const res = await fetch("/api/conversations", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({}),
+            });
             const conv = await res.json();
             currentConvId = conv.id;
             addConvToSidebar(conv.id, conv.title);
@@ -605,7 +609,7 @@
         const item = document.createElement("div");
         item.className = "conversation-item active";
         item.dataset.id = id;
-        item.innerHTML = `<span class="conv-title">${title}</span><button class="delete-btn" data-id="${id}">×</button>`;
+        item.innerHTML = `<span class="conv-title" title="双击重命名">${escapeHtml(title)}</span><button class="delete-btn" data-id="${id}">×</button>`;
 
         document.querySelectorAll(".conversation-item").forEach(el => el.classList.remove("active"));
         convList.prepend(item);
@@ -615,11 +619,21 @@
     function bindConvEvents(item) {
         item.addEventListener("click", function (e) {
             if (e.target.classList.contains("delete-btn")) return;
+            if (e.target.classList.contains("conv-title") || e.target.classList.contains("rename-input")) return;
             document.querySelectorAll(".conversation-item").forEach(el => el.classList.remove("active"));
             item.classList.add("active");
             currentConvId = item.dataset.id;
             loadMessages(currentConvId);
         });
+
+        // 双击标题重命名
+        const titleEl = item.querySelector(".conv-title");
+        if (titleEl) {
+            titleEl.addEventListener("dblclick", function (e) {
+                e.stopPropagation();
+                startRename(item, titleEl);
+            });
+        }
 
         const delBtn = item.querySelector(".delete-btn");
         if (delBtn) {
@@ -645,10 +659,74 @@
         }
     }
 
+    // 进入重命名模式：把标题换成输入框
+    function startRename(item, titleEl) {
+        if (item.querySelector(".rename-input")) return; // 已在重命名中
+
+        const oldTitle = titleEl.textContent;
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "rename-input";
+        input.value = oldTitle;
+        input.maxLength = 50;
+
+        titleEl.style.display = "none";
+        item.insertBefore(input, titleEl.nextSibling);
+
+        input.focus();
+        input.select();
+
+        let finished = false;
+        const finish = async (save) => {
+            if (finished) return;
+            finished = true;
+
+            const newTitle = input.value.trim();
+            input.remove();
+            titleEl.style.display = "";
+
+            if (save && newTitle && newTitle !== oldTitle) {
+                await renameConversation(item.dataset.id, newTitle, titleEl);
+            }
+        };
+
+        input.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") { e.preventDefault(); finish(true); }
+            else if (e.key === "Escape") { finish(false); }
+        });
+        input.addEventListener("blur", function () { finish(true); });
+    }
+
+    // 调用后端重命名接口
+    async function renameConversation(id, title, titleEl) {
+        try {
+            const res = await fetch(`/api/conversations/${id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ title }),
+            });
+            const data = await res.json();
+            if (data.error) {
+                alert(data.error);
+                return;
+            }
+            titleEl.textContent = data.title;
+        } catch (e) {
+            console.error("重命名失败:", e);
+        }
+    }
+
     document.querySelectorAll(".conversation-item").forEach(bindConvEvents);
 
     newChatBtn.addEventListener("click", async function () {
-        const res = await fetch("/api/conversations", { method: "POST" });
+        const title = await promptForTitle();
+        if (title === null) return; // 用户取消
+
+        const res = await fetch("/api/conversations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(title ? { title } : {}),
+        });
         const conv = await res.json();
         addConvToSidebar(conv.id, conv.title);
         currentConvId = conv.id;
@@ -658,6 +736,46 @@
                 <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
             </div>`;
     });
+
+    // 弹窗让用户输入新对话标题；返回 null 表示取消，空字符串表示用默认
+    function promptForTitle() {
+        return new Promise((resolve) => {
+            const overlay = document.createElement("div");
+            overlay.className = "modal-overlay";
+
+            const box = document.createElement("div");
+            box.className = "modal-box";
+            box.innerHTML = `
+                <div class="modal-title">新建对话</div>
+                <input type="text" class="modal-input" placeholder="输入对话标题（留空则自动生成）" maxlength="50" />
+                <div class="modal-actions">
+                    <button class="modal-btn modal-cancel">取消</button>
+                    <button class="modal-btn modal-confirm">创建</button>
+                </div>
+            `;
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+
+            const input = box.querySelector(".modal-input");
+            const cancelBtn = box.querySelector(".modal-cancel");
+            const confirmBtn = box.querySelector(".modal-confirm");
+
+            input.focus();
+
+            const close = (val) => {
+                overlay.remove();
+                resolve(val);
+            };
+
+            cancelBtn.addEventListener("click", () => close(null));
+            overlay.addEventListener("click", (e) => { if (e.target === overlay) close(null); });
+            input.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") close(input.value);
+                else if (e.key === "Escape") close(null);
+            });
+            confirmBtn.addEventListener("click", () => close(input.value));
+        });
+    }
 
     shareBtn.addEventListener("click", async function () {
         if (!currentConvId) {

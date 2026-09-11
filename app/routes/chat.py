@@ -134,7 +134,7 @@ def clear_cache():
 @chat_bp.route("/api/conversations", methods=["POST"])
 @require_api_key
 def create_conversation():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     title = data.get("title", "新对话")
     conv = Conversation(title=title)
     db.session.add(conv)
@@ -171,6 +171,23 @@ def delete_conversation(cid):
     db.session.commit()
     log_audit("delete_conversation", conversation_id=cid)
     return jsonify({"status": "deleted"})
+
+
+@chat_bp.route("/api/conversations/<int:cid>", methods=["PATCH"])
+@require_api_key
+def rename_conversation(cid):
+    """重命名对话标题"""
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"error": "标题不能为空"}), 400
+    conv = db.session.get(Conversation, cid)
+    if not conv:
+        return jsonify({"error": "对话不存在"}), 404
+    conv.title = title[:50]
+    db.session.commit()
+    log_audit("rename_conversation", conversation_id=cid, detail=title)
+    return jsonify({"id": cid, "title": conv.title})
 
 
 # ============================================================
