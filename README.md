@@ -182,7 +182,31 @@ cp .env.example .env
 
 首次启动时 `db.create_all()` 会自动创建所有表，无需手动建表。
 
-**6. 启动应用**
+**6. 数据库迁移**
+
+当 `models.py` 中的模型发生变化（新增字段、新表等），已有数据库不会自动更新，需要手动执行迁移脚本。本项目采用**手写 SQL 脚本**的方式进行迁移（脚本统一放在 `migrations/` 目录，按日期命名，如 `2026-09-11_add_xxx.sql`）。
+
+**执行已有迁移脚本：**
+
+```bash
+psql -U <username> -d flask_chat -f migrations/2026-09-11_add_advanced_features.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-11_add_memory_fields.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-11_add_feedback_field.sql
+```
+
+**新增迁移脚本的约定：**
+
+1. 修改 `app/models.py`，添加新字段或新表
+2. 在 `migrations/` 目录新建脚本，命名格式 `YYYY-MM-DD_描述.sql`
+3. 脚本内容使用 `IF NOT EXISTS`，保证可重复执行，例如：
+
+```sql
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS new_field VARCHAR(100) DEFAULT NULL;
+```
+
+4. 按日期顺序依次执行新脚本即可。建议在脚本头部用注释说明本次变更内容。
+
+**7. 启动应用**
 
 ```bash
 python run.py
@@ -526,7 +550,31 @@ Key configuration options:
 
 `db.create_all()` creates all tables automatically on first run — no manual table creation needed.
 
-**6. Run the application**
+**6. Database migration**
+
+When `models.py` changes (new fields, new tables, etc.), existing databases are not updated automatically — you must run migration scripts manually. This project uses **hand-written SQL scripts** for migrations (stored in the `migrations/` directory, named by date, e.g., `2026-09-11_add_xxx.sql`).
+
+**Running existing migration scripts:**
+
+```bash
+psql -U <username> -d flask_chat -f migrations/2026-09-11_add_advanced_features.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-11_add_memory_fields.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-11_add_feedback_field.sql
+```
+
+**Convention for adding a new migration:**
+
+1. Modify `app/models.py` to add the new field or table
+2. Create a new script in `migrations/` named `YYYY-MM-DD_description.sql`
+3. Use `IF NOT EXISTS` in the script so it is safe to re-run, for example:
+
+```sql
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS new_field VARCHAR(100) DEFAULT NULL;
+```
+
+4. Run new scripts in date order. It's recommended to add a comment at the top of each script describing the change.
+
+**7. Run the application**
 
 ```bash
 python run.py
