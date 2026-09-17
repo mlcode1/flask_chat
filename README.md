@@ -68,7 +68,8 @@ flask_chat/
     │   ├── tool_service.py       # 工具定义与执行（多源 web_search 等）
     │   ├── cache_service.py      # 响应缓存
     │   ├── retry_service.py      # 重试与降级（指数退避 + fallback）
-    │   └── security_service.py   # 安全（API Key 认证 / 注入过滤 / 审计日志）
+    │   ├── security_service.py   # 安全（API Key 认证 / 注入过滤 / 审计日志）
+    │   └── code_index_service.py # 代码索引服务（查询外部代码库 pgvector 向量索引）
     ├── static/
     │   ├── css/style.css
     │   └── js/chat.js
@@ -170,6 +171,7 @@ cp .env.example .env
 | `CODE_EXEC_ENABLED` | 是否启用代码执行工具 | `true` |
 | `API_KEY` | API 鉴权密钥（留空则跳过鉴权） | 空 |
 | `INPUT_FILTER_ENABLED` | 是否启用 Prompt Injection 输入过滤 | `true` |
+| `RATELIMIT_STORAGE_URL` | API 限流存储后端（`memory://` 或 `redis://host:port`） | `memory://` |
 | `CACHE_ENABLED` | 是否启用响应缓存 | `true` |
 | `CACHE_TTL_HOURS` | 缓存有效期（小时） | `1` |
 | `MAX_RETRIES` | 最大重试次数 | `3` |
@@ -181,6 +183,14 @@ cp .env.example .env
 | `LANGCHAIN_PROJECT` | LangSmith 项目名 | `flask_chat` |
 | `LANGCHAIN_API_KEY` | LangSmith API Key | - |
 | `LANGCHAIN_ENDPOINT` | LangSmith 服务端点 | `https://api.smith.langchain.com` |
+| `CODE_INDEX_ENABLED` | 是否启用代码索引功能 | `false` |
+| `CODE_INDEX_DB_HOST` | 代码索引数据库主机 | `localhost` |
+| `CODE_INDEX_DB_PORT` | 代码索引数据库端口 | `5432` |
+| `CODE_INDEX_DB_USER` | 代码索引数据库用户 | `postgres` |
+| `CODE_INDEX_DB_PASSWORD` | 代码索引数据库密码 | - |
+| `CODE_INDEX_DB_NAME` | 代码索引数据库名称 | `flask_chat` |
+| `CODE_INDEX_DEFAULT_REPO` | 默认代码仓库名称 | `flask_chat` |
+| `CODE_INDEX_TOP_K` | 代码搜索返回结果数量 | `8` |
 
 **5. 数据库初始化**
 
@@ -415,6 +425,8 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 | Vector Search | pgvector (cosine similarity + BM25 hybrid search) |
 | File Parsing | pypdf, python-docx |
 | Observability | LangSmith (`@traceable` decorator + env vars) |
+| Security | Flask-Limiter (rate limiting), bleach + DOMPurify (XSS protection) |
+| Code Index | psycopg2 (direct connection to external pgvector index) |
 | Frontend | Vanilla HTML / CSS / JavaScript (marked.js for Markdown) |
 
 ### Project Structure
@@ -441,7 +453,8 @@ flask_chat/
     │   ├── tool_service.py       # Tool definitions and execution (multi-source web_search)
     │   ├── cache_service.py      # Response cache
     │   ├── retry_service.py      # Retry & fallback (exponential backoff)
-    │   └── security_service.py   # Security (API key auth / injection filter / audit log)
+    │   ├── security_service.py   # Security (API key auth / injection filter / audit log)
+    │   └── code_index_service.py # Code index (query external code repo pgvector index)
     ├── static/
     │   ├── css/style.css
     │   └── js/chat.js
@@ -543,6 +556,7 @@ Key configuration options:
 | `CODE_EXEC_ENABLED` | Enable code execution tool | `true` |
 | `API_KEY` | API authentication key (empty = skip auth) | empty |
 | `INPUT_FILTER_ENABLED` | Enable Prompt Injection input filtering | `true` |
+| `RATELIMIT_STORAGE_URL` | Rate limit storage backend (`memory://` or `redis://host:port`) | `memory://` |
 | `CACHE_ENABLED` | Enable response caching | `true` |
 | `CACHE_TTL_HOURS` | Cache TTL (hours) | `1` |
 | `MAX_RETRIES` | Maximum retry count | `3` |
@@ -554,6 +568,14 @@ Key configuration options:
 | `LANGCHAIN_PROJECT` | LangSmith project name | `flask_chat` |
 | `LANGCHAIN_API_KEY` | LangSmith API key | - |
 | `LANGCHAIN_ENDPOINT` | LangSmith endpoint | `https://api.smith.langchain.com` |
+| `CODE_INDEX_ENABLED` | Enable code index feature | `false` |
+| `CODE_INDEX_DB_HOST` | Code index database host | `localhost` |
+| `CODE_INDEX_DB_PORT` | Code index database port | `5432` |
+| `CODE_INDEX_DB_USER` | Code index database user | `postgres` |
+| `CODE_INDEX_DB_PASSWORD` | Code index database password | - |
+| `CODE_INDEX_DB_NAME` | Code index database name | `flask_chat` |
+| `CODE_INDEX_DEFAULT_REPO` | Default code repository name | `flask_chat` |
+| `CODE_INDEX_TOP_K` | Number of results to return | `8` |
 
 **5. Database initialization**
 
