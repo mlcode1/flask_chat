@@ -69,3 +69,16 @@ class Config:
     # Answer Verification
     VERIFY_ENABLED = os.getenv("VERIFY_ENABLED", "false").lower() == "true"
     VERIFY_MODEL = os.getenv("VERIFY_MODEL", "")
+
+    # Code Index (代码索引集成)
+    CODE_INDEX_ENABLED = os.getenv("CODE_INDEX_ENABLED", "false").lower() == "true"
+    CODE_INDEX_DB_HOST = os.getenv("CODE_INDEX_DB_HOST", "localhost")
+    CODE_INDEX_DB_PORT = int(os.getenv("CODE_INDEX_DB_PORT", "5432"))
+    CODE_INDEX_DB_USER = os.getenv("CODE_INDEX_DB_USER", "postgres")
+    CODE_INDEX_DB_PASSWORD = os.getenv("CODE_INDEX_DB_PASSWORD", "postgres")
+    CODE_INDEX_DB_NAME = os.getenv("CODE_INDEX_DB_NAME", "postgres")
+    CODE_INDEX_EMBED_API_BASE =  os.getenv("EMBEDDING_BASE_URL", "http://localhost:11434/v1")
+    CODE_INDEX_EMBED_API_KEY = os.getenv("EMBEDDING_API_KEY", "ollama")
+    CODE_INDEX_EMBED_MODEL =  os.getenv("EMBEDDING_MODEL", "qwen3-embedding:8b")
+    CODE_INDEX_DEFAULT_REPO = os.getenv("CODE_INDEX_DEFAULT_REPO", "flask_chat")
+    CODE_INDEX_TOP_K = int(os.getenv("CODE_INDEX_TOP_K", "5"))

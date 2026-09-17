@@ -62,6 +62,30 @@ def _build_tools_list():
         }
     ]
 
+    # 代码库搜索（按配置决定是否启用）
+    if current_app.config.get("CODE_INDEX_ENABLED", False):
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "search_code",
+                "description": "在已索引的代码库中搜索相关代码片段。当用户的问题涉及代码结构、函数实现、文件内容、类定义、API 接口等代码相关问题时使用此工具。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "搜索查询，描述你要查找的代码内容，例如 '用户登录验证逻辑' 或 '数据库连接配置'"
+                        },
+                        "repo": {
+                            "type": "string",
+                            "description": "要搜索的仓库名称（可选，不传则搜索默认仓库）"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        })
+
     # 网络搜索（按配置决定是否启用）
     if current_app.config.get("WEB_SEARCH_ENABLED", False):
         tools.append({
@@ -166,6 +190,9 @@ def execute_tool(name, arguments):
     if name == "web_search":
         return _exec_web_search(args)
 
+    if name == "search_code":
+        return _exec_search_code(args)
+
     if name == "knowledge_search":
         return _exec_knowledge_search(args)
 
@@ -197,6 +224,39 @@ def _exec_calculate(args):
         return json.dumps({"result": result})
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+def _exec_search_code(args):
+    """代码库向量搜索"""
+    from app.services.code_index_service import search_code
+    
+    query = args.get("query", "")
+    if not query:
+        return json.dumps({"error": "搜索查询不能为空"})
+    
+    repo = args.get("repo", None)
+    
+    try:
+        results = search_code(query, repo_name=repo)
+        
+        if not results:
+            return json.dumps({"message": "代码库中未找到相关内容", "results": []})
+        
+        formatted = [
+            {
+                "file_path": r["file_path"],
+                "file_name": r["file_name"],
+                "file_type": r["file_type"],
+                "content": r["content"][:1500],  # 限制每个片段长度
+                "score": round(r["score"], 3),
+            }
+            for r in results
+        ]
+        
+        return json.dumps({"results": formatted, "total": len(formatted)}, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"代码搜索失败: {e}")
+        return json.dumps({"error": f"代码搜索失败: {str(e)}", "results": []})
 
 
 def _exec_web_search(args):

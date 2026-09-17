@@ -25,7 +25,8 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 - **交互体验** — Markdown 渲染（含代码高亮、一键复制）、消息点赞/点踩反馈
 - **可视化与调试** — Token 统计面板 + 工具调用可视化，调试面板展示系统/缓存/模型状态
 - **LangSmith 监控** — 通过 LangSmith 实现 LLM 调用、RAG 检索、上下文构建等关键流程的全链路可观测
-- **安全防护** — 可选 API Key 鉴权、Prompt Injection 输入过滤、审计日志
+- **安全防护** — 可选 API Key 鉴权、Prompt Injection 输入过滤、XSS 防护（前后端双重消毒）、API 限流（支持 Redis 共享计数）、输入校验、审计日志
+- **代码索引集成** — 可对接外部代码仓库的向量索引（基于 pgvector），AI 在对话中通过 `search_code` 工具自动检索相关代码片段，支持多仓库切换与余弦相似度排序
 
 ### 技术栈
 
@@ -39,6 +40,8 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 | 向量检索 | pgvector（余弦相似度 + BM25 混合检索） |
 | 文件解析 | pypdf、python-docx |
 | 可观测性 | LangSmith（`@traceable` 装饰器 + 环境变量） |
+| 安全 | Flask-Limiter（限流）、bleach + DOMPurify（XSS 防护） |
+| 代码索引 | psycopg2（直连外部代码库 pgvector 索引） |
 | 前端 | 原生 HTML / CSS / JavaScript（marked.js 渲染 Markdown） |
 
 ### 项目结构
@@ -397,7 +400,8 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Interaction** — Markdown rendering (syntax highlighting, one-click copy) and message like/dislike feedback
 - **Visualization & Debugging** — Token statistics panel + tool-call visualization; a debug panel shows system/cache/model status
 - **LangSmith Observability** — End-to-end tracing for LLM calls, RAG retrieval, and context building
-- **Security** — Optional API key auth, Prompt Injection input filtering, and audit logging
+- **Security** — Optional API key auth, Prompt Injection input filtering, XSS protection (frontend + backend sanitization), API rate limiting (supports Redis shared storage), input validation, and audit logging
+- **Code Index Integration** — Connects to external code repository vector indexes (via pgvector), allowing AI to automatically retrieve relevant code snippets during conversation through the `search_code` tool, with multi-repo switching and cosine similarity ranking
 
 ### Tech Stack
 
