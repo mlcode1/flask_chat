@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识库管理 - AI 智能助手</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <a href="/" class="back-to-chat">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M19 12H5M12 19l-7-7 7-7"/>
+                    </svg>
+                    <span>返回对话</span>
+                </a>
+            </div>
+            <div class="sidebar-nav">
+                <a href="/knowledge" class="nav-item active">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                    </svg>
+                    <span>知识库</span>
+                </a>
+                <a href="/code-repos" class="nav-item">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/>
+                    </svg>
+                    <span>代码库</span>
+                </a>
+            </div>
+        </aside>
+
+        <main class="knowledge-area">
+            <div class="knowledge-header">
+                <h2>知识库管理</h2>
+                <div class="header-actions">
+                    <label class="upload-btn-label">
+                        <input type="file" id="file-upload" accept=".txt,.md,.pdf,.docx" hidden>
+                        <span class="knowledge-upload-btn">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                            </svg>
+                            上传文档
+                        </span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="knowledge-content">
+                <div class="knowledge-stats" id="knowledge-stats">
+                    <!-- 动态加载统计信息 -->
+                </div>
+
+                <div class="knowledge-list" id="kb-doc-list">
+                    <div class="kb-empty">暂无文档，点击上方按钮上传</div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Toast 提示容器 -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="{{ url_for('static', filename='js/knowledge.js') }}"></script>
+</body>
+</html>

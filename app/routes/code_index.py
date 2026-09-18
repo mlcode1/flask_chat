@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app
-from app.models import db, CodeRepository
+from app.models import db, CodeRepository, IndexedFile
 from app.services.code_index_builder import build_index, delete_index
 from app.services.security_service import require_api_key
 
@@ -138,9 +138,15 @@ def trigger_index(repo_id):
     # 获取请求参数
     data = request.get_json() or {}
     reindex = data.get('reindex', True)  # 默认重新索引
+    mode = data.get('mode', 'full')  # 默认为全量索引
+
+    # 验证 mode 参数
+    if mode not in ['full', 'incremental']:
+        return jsonify({'status': 'error', 'message': '无效的索引模式，必须是 full 或 incremental'}), 400
 
     # 更新状态为索引中
     repo.status = 'indexing'
+    repo.index_mode = mode
     repo.error_message = None
     repo.progress = 0
     repo.progress_message = '准备索引...'
@@ -187,9 +193,11 @@ def trigger_index(repo_id):
                         pass
 
                 result = build_index(
+                    repo_id=repo_id,
                     repo_name=repo.name,
                     repo_path=repo.path,
                     reindex=reindex,
+                    mode=mode,
                     progress_callback=progress_callback
                 )
 
@@ -203,6 +211,10 @@ def trigger_index(repo_id):
                         repo_ref.error_message = None
                         repo_ref.progress = 100
                         repo_ref.progress_message = '索引完成'
+                        
+                        # 如果是全量索引，更新 last_full_index_time
+                        if mode == 'full':
+                            repo_ref.last_full_index_time = datetime.now(timezone.utc)
                     else:
                         repo_ref.status = 'failed'
                         repo_ref.error_message = result.get('error', '未知错误')
@@ -247,7 +259,7 @@ def trigger_index(repo_id):
 
     return jsonify({
         'status': 'success',
-        'message': '索引任务已启动',
+        'message': f'索引任务已启动（{mode}模式）',
         'repo': repo.to_dict(),
     })
 
@@ -335,4 +347,30 @@ def get_repo_status(repo_id):
     return jsonify({
         'status': 'success',
         'repo': repo.to_dict(),
+    })
+
+
+@code_index_bp.route('/<int:repo_id>/stats', methods=['GET'])
+@require_api_key
+def get_repo_stats(repo_id):
+    """获取仓库索引统计信息"""
+    from app.models import IndexedFile
+    
+    repo = CodeRepository.query.get(repo_id)
+    if not repo:
+        return jsonify({'status': 'error', 'message': '仓库不存在'}), 404
+    
+    # 查询文件索引记录数
+    indexed_files_count = IndexedFile.query.filter_by(repo_id=repo_id).count()
+    
+    return jsonify({
+        'status': 'success',
+        'stats': {
+            'total_files': indexed_files_count,
+            'chunk_count': repo.chunk_count,
+            'last_indexed_at': repo.last_indexed_at.isoformat() if repo.last_indexed_at else None,
+            'last_full_index_time': repo.last_full_index_time.isoformat() if repo.last_full_index_time else None,
+            'index_mode': repo.index_mode,
+            'status': repo.status
+        }
     })

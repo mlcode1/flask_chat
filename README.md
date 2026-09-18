@@ -6,7 +6,7 @@
 
 ### 项目简介
 
-Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模型切换、流式输出、工具调用、上下文压缩与长期记忆、RAG（检索增强生成）知识库系统、LangSmith 全链路监控以及 AI 回答结果验证。数据存储在 PostgreSQL（含 pgvector 向量扩展）中，前端采用原生 JavaScript 实现单页应用。
+Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模型切换、流式输出、工具调用、上下文压缩与长期记忆、RAG（检索增强生成）知识库系统、LangSmith 全链路监控、AI 回答结果验证以及**代码库索引管理**。数据存储在 PostgreSQL（含 pgvector 向量扩展）中，前端采用原生 JavaScript 实现单页应用。
 
 ### 功能特性
 
@@ -15,6 +15,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
 - **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、数据库查询、文件读取、知识库检索、网页搜索等工具；`web_search` 支持 Tavily / Bing / DuckDuckGo 多源自动切换
 - **RAG 知识检索** — 上传文档后，AI 可通过工具调用自动检索知识库回答问题；支持 BM25 + 向量混合检索、多查询重写、结果重排序
+- **代码库索引管理** — 通过 Web UI 管理代码仓库配置（名称 + 本地路径），支持全量构建与增量构建（混合方案：文件修改时间 + SHA256 哈希双重过滤），构建过程实时进度条，支持取消任务；AI 在对话中通过 `search_code` 工具自动检索相关代码片段，自动选择已索引仓库
 - **本地模型支持** — 通过 Ollama 可直接使用本地部署的大语言模型和 Embedding 模型，无需任何云服务；Embedding 也可接入第三方服务
 - **多轮记忆与上下文压缩** — 结构化摘要 + 长期记忆，跨轮次保留关键信息；对话过长时自动压缩历史消息，节省 Token 用量
 - **结果验证（Result Verification）** — 可选开关，开启后由另一个 Agent 对 AI 回答进行事实、逻辑、完整性与清晰度的多维度验证，支持自动验证与手动验证
@@ -26,7 +27,6 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 - **可视化与调试** — Token 统计面板 + 工具调用可视化，调试面板展示系统/缓存/模型状态
 - **LangSmith 监控** — 通过 LangSmith 实现 LLM 调用、RAG 检索、上下文构建等关键流程的全链路可观测
 - **安全防护** — 可选 API Key 鉴权、Prompt Injection 输入过滤、XSS 防护（前后端双重消毒）、API 限流（支持 Redis 共享计数）、输入校验、审计日志
-- **代码索引集成** — 可对接外部代码仓库的向量索引（基于 pgvector），AI 在对话中通过 `search_code` 工具自动检索相关代码片段，支持多仓库切换与余弦相似度排序
 
 ### 技术栈
 
@@ -38,44 +38,60 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 | LLM 接口 | OpenAI SDK（兼容任意 OpenAI 协议的服务） |
 | Embedding 模型 | Ollama（qwen3-embedding:8b）或第三方 Embedding 服务 |
 | 向量检索 | pgvector（余弦相似度 + BM25 混合检索） |
+| 代码索引构建 | LlamaIndex + CodeSplitter（tree-sitter）+ PGVectorStore |
 | 文件解析 | pypdf、python-docx |
 | 可观测性 | LangSmith（`@traceable` 装饰器 + 环境变量） |
 | 安全 | Flask-Limiter（限流）、bleach + DOMPurify（XSS 防护） |
-| 代码索引 | psycopg2（直连外部代码库 pgvector 索引） |
+| 代码索引查询 | psycopg2（直连 pgvector 索引） |
 | 前端 | 原生 HTML / CSS / JavaScript（marked.js 渲染 Markdown） |
 
 ### 项目结构
 
 ```
 flask_chat/
-├── run.py                        # 启动入口
-├── requirements.txt              # Python 依赖
-├── .env.example                  # 环境变量模板
+├── run.py                             # 启动入口
+├── requirements.txt                   # Python 依赖
+├── .env.example                       # 环境变量模板
+├── migrations/                        # 数据库迁移脚本（按日期命名）
+│   ├── 2026-09-11_add_advanced_features.sql
+│   ├── 2026-09-11_add_memory_fields.sql
+│   ├── 2026-09-11_add_feedback_field.sql
+│   ├── 2026-09-17_add_code_repositories.sql
+│   ├── 2026-09-17_add_progress_fields.sql
+│   └── 2026-09-18_incremental_index.sql
 └── app/
-    ├── __init__.py               # 应用工厂（create_app）
-    ├── config.py                 # 配置类
-    ├── extensions.py             # Flask 扩展（SQLAlchemy）
-    ├── models.py                 # 数据模型
-    ├── middleware.py             # 中间件（免责声明等）
+    ├── __init__.py                    # 应用工厂（create_app + 启动清理）
+    ├── config.py                      # 配置类
+    ├── extensions.py                  # Flask 扩展（SQLAlchemy）
+    ├── models.py                      # 数据模型
+    ├── middleware.py                  # 中间件（免责声明等）
     ├── routes/
-    │   ├── chat.py               # 对话、验证、分享、导出、反馈、审计路由
-    │   └── rag.py                # RAG 知识库路由
+    │   ├── chat.py                    # 对话、验证、分享、导出、反馈、审计、页面路由
+    │   ├── rag.py                     # RAG 知识库路由
+    │   └── code_index.py             # 代码库索引管理 API
     ├── services/
-    │   ├── ai_service.py         # AI 服务（流式输出 + 工具调用循环 + 模型降级）
-    │   ├── context_service.py    # 上下文管理（窗口裁剪 + 压缩 + 长期记忆）
-    │   ├── rag_service.py        # RAG 服务（解析/分块/嵌入/存储/混合检索）
-    │   ├── verifier_service.py   # 结果验证服务（独立 Agent 验证）
-    │   ├── tool_service.py       # 工具定义与执行（多源 web_search 等）
-    │   ├── cache_service.py      # 响应缓存
-    │   ├── retry_service.py      # 重试与降级（指数退避 + fallback）
-    │   ├── security_service.py   # 安全（API Key 认证 / 注入过滤 / 审计日志）
-    │   └── code_index_service.py # 代码索引服务（查询外部代码库 pgvector 向量索引）
+    │   ├── ai_service.py             # AI 服务（流式输出 + 工具调用循环 + 模型降级）
+    │   ├── context_service.py        # 上下文管理（窗口裁剪 + 压缩 + 长期记忆）
+    │   ├── rag_service.py            # RAG 服务（解析/分块/嵌入/存储/混合检索）
+    │   ├── verifier_service.py       # 结果验证服务（独立 Agent 验证）
+    │   ├── tool_service.py           # 工具定义与执行（多源 web_search 等）
+    │   ├── cache_service.py          # 响应缓存
+    │   ├── retry_service.py          # 重试与降级（指数退避 + fallback）
+    │   ├── security_service.py       # 安全（API Key 认证 / 注入过滤 / 审计日志）
+    │   ├── code_index_service.py     # 代码索引查询服务（pgvector 向量搜索）
+    │   └── code_index_builder.py     # 代码索引构建服务（LlamaIndex + 全量/增量）
     ├── static/
     │   ├── css/style.css
-    │   └── js/chat.js
+    │   └── js/
+    │       ├── chat.js               # 主对话页交互逻辑
+    │       ├── knowledge.js          # 知识库管理页独立逻辑
+    │       ├── code_repos.js         # 代码库管理页独立逻辑
+    │       └── marked.min.js         # Markdown 渲染（本地）
     └── templates/
-        ├── index.html            # 主对话页
-        └── shared.html           # 分享对话查看页
+        ├── index.html                # 主对话页
+        ├── knowledge.html            # 知识库管理页（独立）
+        ├── code_repos.html           # 代码库管理页（独立）
+        └── shared.html               # 分享对话查看页
 ```
 
 ### 数据模型
@@ -89,6 +105,8 @@ flask_chat/
 | `SharedConversation` | `shared_conversations` | 分享链接 |
 | `ConversationTemplate` | `conversation_templates` | 对话模板 |
 | `AuditLog` | `audit_logs` | 审计日志 |
+| `CodeRepository` | `code_repositories` | 代码仓库配置（名称、路径、索引状态、进度、模式等） |
+| `IndexedFile` | `indexed_files` | 文件索引记录（路径、SHA256 哈希、修改时间，用于增量索引） |
 
 ### 环境要求
 
@@ -183,14 +201,21 @@ cp .env.example .env
 | `LANGCHAIN_PROJECT` | LangSmith 项目名 | `flask_chat` |
 | `LANGCHAIN_API_KEY` | LangSmith API Key | - |
 | `LANGCHAIN_ENDPOINT` | LangSmith 服务端点 | `https://api.smith.langchain.com` |
+| **代码索引配置** | | |
 | `CODE_INDEX_ENABLED` | 是否启用代码索引功能 | `false` |
 | `CODE_INDEX_DB_HOST` | 代码索引数据库主机 | `localhost` |
 | `CODE_INDEX_DB_PORT` | 代码索引数据库端口 | `5432` |
 | `CODE_INDEX_DB_USER` | 代码索引数据库用户 | `postgres` |
 | `CODE_INDEX_DB_PASSWORD` | 代码索引数据库密码 | - |
 | `CODE_INDEX_DB_NAME` | 代码索引数据库名称 | `flask_chat` |
-| `CODE_INDEX_DEFAULT_REPO` | 默认代码仓库名称 | `flask_chat` |
+| `CODE_INDEX_DEFAULT_REPO` | 默认代码仓库名称（搜索时优先使用） | `flask_chat` |
 | `CODE_INDEX_TOP_K` | 代码搜索返回结果数量 | `8` |
+| **索引构建配置** | | |
+| `CODE_INDEX_CHUNK_LINES` | 代码分块行数 | `100` |
+| `CODE_INDEX_CHUNK_LINES_OVERLAP` | 代码分块重叠行数 | `10` |
+| `CODE_INDEX_MAX_CHARS` | 代码分块最大字符数 | `1500` |
+| `CODE_INDEX_SUPPORTED_EXTS` | 支持索引的文件扩展名 | `.py,.js,.ts,.tsx,...` |
+| `CODE_INDEX_EXCLUDE_PATTERNS` | 排除的目录/文件名模式 | `.git,__pycache__,...` |
 
 **5. 数据库初始化**
 
@@ -206,6 +231,9 @@ cp .env.example .env
 psql -U <username> -d flask_chat -f migrations/2026-09-11_add_advanced_features.sql
 psql -U <username> -d flask_chat -f migrations/2026-09-11_add_memory_fields.sql
 psql -U <username> -d flask_chat -f migrations/2026-09-11_add_feedback_field.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-17_add_code_repositories.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-17_add_progress_fields.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-18_incremental_index.sql
 ```
 
 **新增迁移脚本的约定：**
@@ -298,6 +326,38 @@ EMBEDDING_DIM=3072                              # 对应向量维度
 
 RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM，因此 Embedding 换第三方后知识库功能可正常运行。只需确保 `EMBEDDING_DIM` 与所选模型的实际输出维度一致。
 
+### 代码库索引管理
+
+代码库索引管理功能允许用户通过 Web UI 配置本地代码仓库，并构建向量索引。AI 在对话中通过 `search_code` 工具自动检索相关代码片段。
+
+**页面入口：**
+
+- **主页面**（`/`）：侧边栏显示知识库和代码库的数量徽章及导航链接
+- **代码库管理页**（`/code-repos`）：独立的代码库管理页面
+- **知识库管理页**（`/knowledge`）：独立的知识库管理页面
+
+**支持的功能：**
+
+- 添加/删除代码仓库配置（仓库名称 + 本地路径）
+- 全量构建索引（清空重建）
+- 增量构建索引（混合方案：文件修改时间初筛 + SHA256 哈希验证，只索引新增/修改的文件，自动清理已删除文件的索引）
+- 构建过程实时进度条（每 3 秒轮询）
+- 取消正在进行的索引任务
+- 搜索测试
+- 敏感内容自动过滤（API Key、密码、Token 等）
+
+**索引原理：**
+
+- 使用 LlamaIndex 的 `CodeSplitter`（基于 tree-sitter）进行语法感知的代码分割
+- 使用 `OllamaEmbedding`（qwen3-embedding:8b，4096 维）生成代码向量
+- 存储到 PostgreSQL 的 `data_code_embeddings_{repo_name}` 表（PGVectorStore 自动加 `data_` 前缀）
+- 增量索引时，通过 `indexed_files` 表记录每个文件的路径和哈希值，对比变化后只处理差异文件
+
+**搜索时的仓库选择逻辑：**
+
+- 指定了仓库名：先校验该仓库是否已索引，未索引则直接返回空结果
+- 未指定仓库名：自动查找已索引的仓库列表，优先使用配置中的默认仓库（`CODE_INDEX_DEFAULT_REPO`），否则使用第一个已索引的仓库
+
 ### 使用说明
 
 - **对话** — 在输入框输入消息，按 Enter 发送，Shift+Enter 换行
@@ -305,8 +365,8 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 - **重命名对话** — 鼠标悬停在左侧某条对话上，点击出现的编辑按钮（✎）即可原地重命名（回车或点击别处保存，Esc 取消）
 - **切换模型** — 在顶部下拉框选择不同的大语言模型
 - **打断生成** — AI 回复时点击「打断」按钮停止生成
-- **知识库** — 在左侧栏点击「+」上传文档（支持 `.txt`、`.md`、`.pdf`、`.docx`），上传后 AI 会在需要时自动检索知识库
-- **删除文档** — 在左侧栏文档列表中点击 `×` 删除已上传的文档
+- **知识库管理** — 侧边栏点击「知识库管理」进入独立页面，支持上传文档（`.txt`、`.md`、`.pdf`、`.docx`）、删除文档、查看统计信息
+- **代码库管理** — 侧边栏点击「代码库管理」进入独立页面，支持添加代码仓库、全量/增量构建索引、查看进度、取消任务、搜索测试、删除仓库
 - **结果验证** — 顶部打开「结果验证」开关后，AI 回答完成后会自动触发验证；也可点击消息下方的「🔍 结果验证」按钮对历史回答手动验证。验证结果以卡片形式展示，包括通过/未通过、置信度、问题点等
 - **分享对话** — 点击顶部「分享」按钮生成公开链接，其他人可通过 `/share/<token>` 查看（只读）
 - **导出对话** — 点击顶部「导出」按钮，选择 Markdown / JSON / TXT 格式下载
@@ -321,6 +381,8 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/` | 主页 |
+| `GET` | `/knowledge` | 知识库管理页 |
+| `GET` | `/code-repos` | 代码库管理页 |
 | `GET` | `/api/models` | 获取可用模型列表 |
 | `POST` | `/api/conversations` | 创建新对话（请求体可选 `{"title": "..."}`） |
 | `PATCH` | `/api/conversations/<id>` | 重命名对话（请求体：`{"title": "..."}`） |
@@ -354,6 +416,20 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 | `GET` | `/api/documents` | 获取知识库文档列表 |
 | `DELETE` | `/api/documents/<id>` | 删除知识库文档 |
 | `POST` | `/api/documents/search` | 搜索知识库 |
+
+#### 代码库索引管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/code-repos` | 获取所有代码仓库列表 |
+| `POST` | `/api/code-repos` | 创建代码仓库配置（`{"name": "...", "path": "..."}`） |
+| `GET` | `/api/code-repos/<id>` | 获取单个仓库配置 |
+| `DELETE` | `/api/code-repos/<id>` | 删除仓库配置及其索引 |
+| `POST` | `/api/code-repos/<id>/index` | 触发索引构建（异步，`{"mode": "full"/"incremental", "reindex": true}`） |
+| `GET` | `/api/code-repos/<id>/progress` | 获取索引构建进度 |
+| `POST` | `/api/code-repos/<id>/cancel` | 取消正在进行的索引任务 |
+| `GET` | `/api/code-repos/<id>/status` | 获取仓库索引状态 |
+| `GET` | `/api/code-repos/<id>/stats` | 获取索引统计信息 |
 
 #### 图片上传与反馈
 
@@ -391,7 +467,7 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 
 ### Introduction
 
-Flask Chat is an AI-powered chat application built with Flask. It supports multi-model switching, streaming responses, tool calling, context compression with long-term memory, a RAG (Retrieval-Augmented Generation) knowledge base, LangSmith observability, and an optional AI answer verification feature. Data is stored in PostgreSQL (with the pgvector extension), and the frontend is a vanilla JavaScript single-page application.
+Flask Chat is an AI-powered chat application built with Flask. It supports multi-model switching, streaming responses, tool calling, context compression with long-term memory, a RAG (Retrieval-Augmented Generation) knowledge base, LangSmith observability, an optional AI answer verification feature, and **code repository index management**. Data is stored in PostgreSQL (with the pgvector extension), and the frontend is a vanilla JavaScript single-page application.
 
 ### Features
 
@@ -400,6 +476,7 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Stream Interruption** — Stop AI generation at any time
 - **Tool Calling** — Function Calling with built-in tools: current time, math calculation, code execution, database query, file reading, knowledge-base search, web search; `web_search` supports Tavily / Bing / DuckDuckGo with automatic fallback
 - **RAG Knowledge Base** — Upload documents and let the AI automatically search the knowledge base when answering questions; supports BM25 + vector hybrid search, multi-query rewriting, and result reranking
+- **Code Index Management** — Manage code repository configurations via Web UI (name + local path), supports full and incremental indexing (hybrid approach: file mtime + SHA256 hash double filtering), real-time progress bar during indexing, task cancellation; AI automatically retrieves relevant code snippets during conversation through the `search_code` tool with automatic repo selection
 - **Local Model Support** — Run both LLM and Embedding models locally via Ollama, no cloud service required; embedding can also use a third-party service
 - **Multi-turn Memory & Context Compression** — Structured summarization + long-term memory across turns; automatically compresses older messages when conversations get too long
 - **Result Verification** — Optional toggle that runs a second agent to validate every AI answer for accuracy, logic, completeness, and clarity. Supports both auto-verification and manual on-demand verification
@@ -411,7 +488,6 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Visualization & Debugging** — Token statistics panel + tool-call visualization; a debug panel shows system/cache/model status
 - **LangSmith Observability** — End-to-end tracing for LLM calls, RAG retrieval, and context building
 - **Security** — Optional API key auth, Prompt Injection input filtering, XSS protection (frontend + backend sanitization), API rate limiting (supports Redis shared storage), input validation, and audit logging
-- **Code Index Integration** — Connects to external code repository vector indexes (via pgvector), allowing AI to automatically retrieve relevant code snippets during conversation through the `search_code` tool, with multi-repo switching and cosine similarity ranking
 
 ### Tech Stack
 
@@ -423,44 +499,60 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 | LLM Interface | OpenAI SDK (compatible with any OpenAI-protocol service) |
 | Embedding Model | Ollama (qwen3-embedding:8b) or third-party embedding service |
 | Vector Search | pgvector (cosine similarity + BM25 hybrid search) |
+| Code Index Builder | LlamaIndex + CodeSplitter (tree-sitter) + PGVectorStore |
 | File Parsing | pypdf, python-docx |
 | Observability | LangSmith (`@traceable` decorator + env vars) |
 | Security | Flask-Limiter (rate limiting), bleach + DOMPurify (XSS protection) |
-| Code Index | psycopg2 (direct connection to external pgvector index) |
+| Code Index Query | psycopg2 (direct connection to pgvector index) |
 | Frontend | Vanilla HTML / CSS / JavaScript (marked.js for Markdown) |
 
 ### Project Structure
 
 ```
 flask_chat/
-├── run.py                        # Entry point
-├── requirements.txt              # Python dependencies
-├── .env.example                  # Environment template
+├── run.py                             # Entry point
+├── requirements.txt                   # Python dependencies
+├── .env.example                       # Environment template
+├── migrations/                        # Database migration scripts (date-named)
+│   ├── 2026-09-11_add_advanced_features.sql
+│   ├── 2026-09-11_add_memory_fields.sql
+│   ├── 2026-09-11_add_feedback_field.sql
+│   ├── 2026-09-17_add_code_repositories.sql
+│   ├── 2026-09-17_add_progress_fields.sql
+│   └── 2026-09-18_incremental_index.sql
 └── app/
-    ├── __init__.py               # App factory (create_app)
-    ├── config.py                 # Configuration class
-    ├── extensions.py             # Flask extensions (SQLAlchemy)
-    ├── models.py                 # Database models
-    ├── middleware.py             # Middleware (disclaimer, etc.)
+    ├── __init__.py                    # App factory (create_app + startup cleanup)
+    ├── config.py                      # Configuration class
+    ├── extensions.py                  # Flask extensions (SQLAlchemy)
+    ├── models.py                      # Database models
+    ├── middleware.py                  # Middleware (disclaimer, etc.)
     ├── routes/
-    │   ├── chat.py               # Chat, verification, sharing, export, feedback, audit routes
-    │   └── rag.py                # RAG knowledge base routes
+    │   ├── chat.py                    # Chat, verification, sharing, export, feedback, audit, page routes
+    │   ├── rag.py                     # RAG knowledge base routes
+    │   └── code_index.py             # Code repository index management API
     ├── services/
-    │   ├── ai_service.py         # AI service (streaming + tool call loop + model fallback)
-    │   ├── context_service.py    # Context management (window + compression + long-term memory)
-    │   ├── rag_service.py        # RAG service (parse/chunk/embed/store/hybrid search)
-    │   ├── verifier_service.py   # Result verification service (second-agent validation)
-    │   ├── tool_service.py       # Tool definitions and execution (multi-source web_search)
-    │   ├── cache_service.py      # Response cache
-    │   ├── retry_service.py      # Retry & fallback (exponential backoff)
-    │   ├── security_service.py   # Security (API key auth / injection filter / audit log)
-    │   └── code_index_service.py # Code index (query external code repo pgvector index)
+    │   ├── ai_service.py             # AI service (streaming + tool call loop + model fallback)
+    │   ├── context_service.py        # Context management (window + compression + long-term memory)
+    │   ├── rag_service.py            # RAG service (parse/chunk/embed/store/hybrid search)
+    │   ├── verifier_service.py       # Result verification service (second-agent validation)
+    │   ├── tool_service.py           # Tool definitions and execution (multi-source web_search)
+    │   ├── cache_service.py          # Response cache
+    │   ├── retry_service.py          # Retry & fallback (exponential backoff)
+    │   ├── security_service.py       # Security (API key auth / injection filter / audit log)
+    │   ├── code_index_service.py     # Code index query service (pgvector vector search)
+    │   └── code_index_builder.py     # Code index builder service (LlamaIndex + full/incremental)
     ├── static/
     │   ├── css/style.css
-    │   └── js/chat.js
+    │   └── js/
+    │       ├── chat.js               # Main chat page interaction logic
+    │       ├── knowledge.js          # Knowledge base management page logic
+    │       ├── code_repos.js         # Code repository management page logic
+    │       └── marked.min.js         # Markdown rendering (local)
     └── templates/
-        ├── index.html            # Main chat page
-        └── shared.html           # Shared conversation view page
+        ├── index.html                # Main chat page
+        ├── knowledge.html            # Knowledge base management page (standalone)
+        ├── code_repos.html           # Code repository management page (standalone)
+        └── shared.html               # Shared conversation view page
 ```
 
 ### Data Models
@@ -474,6 +566,8 @@ flask_chat/
 | `SharedConversation` | `shared_conversations` | Share link |
 | `ConversationTemplate` | `conversation_templates` | Conversation template |
 | `AuditLog` | `audit_logs` | Audit log |
+| `CodeRepository` | `code_repositories` | Code repository config (name, path, index status, progress, mode, etc.) |
+| `IndexedFile` | `indexed_files` | File index record (path, SHA256 hash, mtime, for incremental indexing) |
 
 ### Prerequisites
 
@@ -568,14 +662,21 @@ Key configuration options:
 | `LANGCHAIN_PROJECT` | LangSmith project name | `flask_chat` |
 | `LANGCHAIN_API_KEY` | LangSmith API key | - |
 | `LANGCHAIN_ENDPOINT` | LangSmith endpoint | `https://api.smith.langchain.com` |
+| **Code Index Config** | | |
 | `CODE_INDEX_ENABLED` | Enable code index feature | `false` |
 | `CODE_INDEX_DB_HOST` | Code index database host | `localhost` |
 | `CODE_INDEX_DB_PORT` | Code index database port | `5432` |
 | `CODE_INDEX_DB_USER` | Code index database user | `postgres` |
 | `CODE_INDEX_DB_PASSWORD` | Code index database password | - |
 | `CODE_INDEX_DB_NAME` | Code index database name | `flask_chat` |
-| `CODE_INDEX_DEFAULT_REPO` | Default code repository name | `flask_chat` |
+| `CODE_INDEX_DEFAULT_REPO` | Default code repository name (preferred during search) | `flask_chat` |
 | `CODE_INDEX_TOP_K` | Number of results to return | `8` |
+| **Index Builder Config** | | |
+| `CODE_INDEX_CHUNK_LINES` | Code chunk line count | `100` |
+| `CODE_INDEX_CHUNK_LINES_OVERLAP` | Code chunk overlap lines | `10` |
+| `CODE_INDEX_MAX_CHARS` | Code chunk max characters | `1500` |
+| `CODE_INDEX_SUPPORTED_EXTS` | Supported file extensions for indexing | `.py,.js,.ts,.tsx,...` |
+| `CODE_INDEX_EXCLUDE_PATTERNS` | Excluded directory/file name patterns | `.git,__pycache__,...` |
 
 **5. Database initialization**
 
@@ -591,6 +692,9 @@ When `models.py` changes (new fields, new tables, etc.), existing databases are 
 psql -U <username> -d flask_chat -f migrations/2026-09-11_add_advanced_features.sql
 psql -U <username> -d flask_chat -f migrations/2026-09-11_add_memory_fields.sql
 psql -U <username> -d flask_chat -f migrations/2026-09-11_add_feedback_field.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-17_add_code_repositories.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-17_add_progress_fields.sql
+psql -U <username> -d flask_chat -f migrations/2026-09-18_incremental_index.sql
 ```
 
 **Convention for adding a new migration:**
@@ -683,6 +787,38 @@ EMBEDDING_DIM=3072                              # Matching vector dimension
 
 RAG functionality (document parsing, chunking, embedding, hybrid search) does not depend on the LLM, so the knowledge base keeps working after switching to a third-party embedding provider. Just make sure `EMBEDDING_DIM` matches the actual output dimension of the chosen model.
 
+### Code Index Management
+
+The code index management feature allows users to configure local code repositories via the Web UI and build vector indexes. The AI automatically retrieves relevant code snippets during conversation through the `search_code` tool.
+
+**Page access:**
+
+- **Main page** (`/`): Sidebar shows knowledge base and code repository count badges with navigation links
+- **Code repos page** (`/code-repos`): Standalone code repository management page
+- **Knowledge page** (`/knowledge`): Standalone knowledge base management page
+
+**Supported features:**
+
+- Add/delete code repository configurations (repository name + local path)
+- Full index build (clear and rebuild)
+- Incremental index build (hybrid approach: file mtime pre-filtering + SHA256 hash verification, only indexes new/modified files, automatically cleans up deleted file indexes)
+- Real-time progress bar during indexing (polls every 3 seconds)
+- Cancel ongoing index tasks
+- Search testing
+- Automatic sensitive content filtering (API keys, passwords, tokens, etc.)
+
+**Indexing principles:**
+
+- Uses LlamaIndex's `CodeSplitter` (based on tree-sitter) for syntax-aware code splitting
+- Uses `OllamaEmbedding` (qwen3-embedding:8b, 4096 dimensions) to generate code vectors
+- Stored in PostgreSQL `data_code_embeddings_{repo_name}` table (PGVectorStore auto-adds `data_` prefix)
+- During incremental indexing, the `indexed_files` table records each file's path and hash, compares changes, and only processes differential files
+
+**Repository selection logic during search:**
+
+- Repository name specified: Validates whether the repository has been indexed first; returns empty results if not indexed
+- No repository name specified: Automatically finds the list of indexed repositories, prioritizes the default repository from config (`CODE_INDEX_DEFAULT_REPO`), otherwise uses the first indexed repository
+
 ### Usage
 
 - **Chat** — Type a message in the input box, press Enter to send, Shift+Enter for new line
@@ -690,8 +826,8 @@ RAG functionality (document parsing, chunking, embedding, hybrid search) does no
 - **Rename Conversation** — Hover over a conversation in the sidebar and click the edit button (✎) to rename it inline (Enter or click away to save, Esc to cancel)
 - **Switch Models** — Select a different LLM from the dropdown at the top
 - **Interrupt** — Click the "Interrupt" button during AI generation to stop it
-- **Knowledge Base** — Click "+" in the sidebar to upload documents (supports `.txt`, `.md`, `.pdf`, `.docx`). The AI will automatically search the knowledge base when needed
-- **Delete Documents** — Click "×" next to a document in the sidebar to remove it
+- **Knowledge Base** — Click "Knowledge Base" in the sidebar to enter the standalone management page. Supports document upload (`.txt`, `.md`, `.pdf`, `.docx`), deletion, and statistics
+- **Code Repositories** — Click "Code Repositories" in the sidebar to enter the standalone management page. Supports adding repositories, full/incremental index building, progress tracking, task cancellation, search testing, and deletion
 - **Result Verification** — Toggle the "Result Verification" switch in the header to auto-verify every AI answer. You can also click the "🔍 Verify" button on any message for manual on-demand verification. Results are shown as a card with pass/fail, confidence, and issues
 - **Share Conversation** — Click the "Share" button to generate a public link viewable via `/share/<token>` (read-only)
 - **Export Conversation** — Click the "Export" button and choose Markdown / JSON / TXT format to download
@@ -706,6 +842,8 @@ RAG functionality (document parsing, chunking, embedding, hybrid search) does no
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Main page |
+| `GET` | `/knowledge` | Knowledge base management page |
+| `GET` | `/code-repos` | Code repository management page |
 | `GET` | `/api/models` | List available models |
 | `POST` | `/api/conversations` | Create a new conversation (optional body `{"title": "..."}`) |
 | `PATCH` | `/api/conversations/<id>` | Rename a conversation (body `{"title": "..."}`) |
@@ -739,6 +877,20 @@ RAG functionality (document parsing, chunking, embedding, hybrid search) does no
 | `GET` | `/api/documents` | List knowledge base documents |
 | `DELETE` | `/api/documents/<id>` | Delete a knowledge base document |
 | `POST` | `/api/documents/search` | Search the knowledge base |
+
+#### Code Index Management
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/code-repos` | List all code repositories |
+| `POST` | `/api/code-repos` | Create repository config (`{"name": "...", "path": "..."}`) |
+| `GET` | `/api/code-repos/<id>` | Get single repository config |
+| `DELETE` | `/api/code-repos/<id>` | Delete repository config and its index |
+| `POST` | `/api/code-repos/<id>/index` | Trigger index build (async, `{"mode": "full"/"incremental", "reindex": true}`) |
+| `GET` | `/api/code-repos/<id>/progress` | Get index build progress |
+| `POST` | `/api/code-repos/<id>/cancel` | Cancel ongoing index task |
+| `GET` | `/api/code-repos/<id>/status` | Get repository index status |
+| `GET` | `/api/code-repos/<id>/stats` | Get index statistics |
 
 #### Image Upload & Feedback
 

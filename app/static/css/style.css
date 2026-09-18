@@ -275,6 +275,63 @@ body {
     border-color: var(--accent);
 }
 
+/* 索引模式选择 */
+.index-mode-options {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.index-mode-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 2px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.index-mode-option:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.index-mode-option input[type="radio"] {
+    margin-top: 2px;
+    cursor: pointer;
+    accent-color: var(--accent);
+}
+
+.index-mode-option input[type="radio"]:checked + .index-mode-content {
+    color: var(--accent);
+}
+
+.index-mode-option:has(input[type="radio"]:checked) {
+    background: rgba(0, 200, 83, 0.1);
+    border-color: var(--accent);
+}
+
+.index-mode-content {
+    flex: 1;
+}
+
+.index-mode-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.index-mode-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
 .modal-actions {
     display: flex;
     justify-content: flex-end;
@@ -941,6 +998,33 @@ body {
 
 .upload-btn:hover {
     background: #06a953;
+}
+
+/* 知识库页面上传按钮 */
+.knowledge-upload-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: white;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1;
+    transition: background 0.2s;
+    border: none;
+    outline: none;
+    box-shadow: none;
+    cursor: pointer;
+}
+
+.knowledge-upload-btn:hover {
+    background: #06a953;
+}
+
+.knowledge-upload-btn svg {
+    flex-shrink: 0;
 }
 
 .kb-doc-list {
@@ -1784,4 +1868,209 @@ textarea.form-control {
     margin: 0;
     line-height: 1.6;
     color: #333;
+}
+
+/* 知识库和代码库管理页面 */
+.knowledge-area, .code-repos-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-chat);
+    overflow: hidden;
+}
+
+.knowledge-header, .code-repos-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    background: white;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.knowledge-header h2, .code-repos-header h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.knowledge-content, .code-repos-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+}
+
+.knowledge-stats, .code-repos-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.stat-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+    background: white;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    transition: all 0.2s;
+}
+
+.stat-card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.stat-icon {
+    font-size: 32px;
+}
+
+.stat-info {
+    flex: 1;
+}
+
+.stat-value {
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.2;
+}
+
+.stat-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
+.knowledge-list {
+    background: white;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+}
+
+.knowledge-list .kb-empty {
+    padding: 48px 24px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.code-repos-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.add-repo-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.add-repo-btn:hover {
+    background: var(--accent-hover, #05a050);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(7, 193, 96, 0.3);
+}
+
+.add-repo-btn:active {
+    transform: translateY(0);
+}
+
+/* 侧边栏导航 */
+.sidebar-nav {
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    color: var(--text-sidebar);
+    text-decoration: none;
+    border-radius: 8px;
+    transition: all 0.2s;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.nav-item:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-sidebar-hover);
+}
+
+.nav-item.active {
+    background: var(--accent);
+    color: white;
+}
+
+.nav-item svg {
+    flex-shrink: 0;
+}
+
+.nav-badge {
+    margin-left: auto;
+    background: rgba(255, 255, 255, 0.15);
+    color: var(--text-sidebar);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    min-width: 20px;
+    text-align: center;
+}
+
+.nav-item.active .nav-badge {
+    background: rgba(255, 255, 255, 0.25);
+    color: white;
+}
+
+.back-to-chat {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    color: var(--text-sidebar);
+    text-decoration: none;
+    border-radius: 8px;
+    transition: all 0.2s;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.back-to-chat:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-sidebar-hover);
+}
+
+.back-to-chat svg {
+    flex-shrink: 0;
+}
+
+/* 搜索测试弹窗优化 */
+#search-test-modal .modal-box {
+    width: 500px;
+    max-width: 90vw;
+}
+
+#search-test-modal .modal-body {
+    max-height: 60vh;
+    overflow-y: auto;
 }

@@ -181,6 +181,32 @@ def execute_tool(name, arguments):
     """执行工具调用"""
     args = json.loads(arguments) if isinstance(arguments, str) else arguments
 
+    # 确保 session 干净：如果之前有工具执行失败导致事务异常，先 rollback
+    try:
+        from app.extensions import db
+        if db.session.is_active:
+            db.session.rollback()
+    except Exception:
+        pass
+
+    try:
+        result = _dispatch_tool(name, args)
+        return result
+    except Exception as e:
+        # 工具执行异常时 rollback，防止后续工具连锁报 InFailedSqlTransaction
+        try:
+            from app.extensions import db
+            db.session.rollback()
+        except Exception:
+            pass
+        # 日志记录完整异常信息
+        logger.error(f"工具 '{name}' 执行异常: {e}", exc_info=True)
+        # 返回用户友好的错误信息，不暴露技术细节
+        return json.dumps({"error": f"工具执行失败，请稍后重试", "results": []})
+
+
+def _dispatch_tool(name, args):
+    """工具分发"""
     if name == "get_current_time":
         return json.dumps({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
 
@@ -223,7 +249,8 @@ def _exec_calculate(args):
         result = eval(expression, {"__builtins__": {}}, {})
         return json.dumps({"result": result})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        logger.warning(f"计算失败: {e}")
+        return json.dumps({"error": "计算表达式有误，请检查输入"})
 
 
 def _exec_search_code(args):
@@ -256,7 +283,7 @@ def _exec_search_code(args):
         return json.dumps({"results": formatted, "total": len(formatted)}, ensure_ascii=False)
     except Exception as e:
         logger.warning(f"代码搜索失败: {e}")
-        return json.dumps({"error": f"代码搜索失败: {str(e)}", "results": []})
+        return json.dumps({"message": "代码库搜索服务暂时不可用", "results": []})
 
 
 def _exec_web_search(args):
@@ -299,7 +326,7 @@ def _tavily_search(query: str, api_key: str, max_results: int) -> str:
         response = client.search(query, max_results=max_results)
     except Exception as e:
         logger.warning(f"Tavily 搜索失败：{e}")
-        return f"Tavily 搜索失败：{e}"
+        return "网络搜索暂时不可用，请稍后重试"
 
     results = response.get("results", [])
     if not results:
@@ -365,7 +392,7 @@ def _bing_search(query: str, max_results: int) -> str:
         return json.dumps({"results": results}, ensure_ascii=False)
     except Exception as e:
         logger.warning(f"Bing 搜索失败：{e}")
-        return f"Bing 搜索失败：{e}"
+        return "网络搜索暂时不可用，请稍后重试"
 
 
 def _ddg_search(query: str, max_results: int) -> str:
@@ -398,15 +425,25 @@ def _ddg_search(query: str, max_results: int) -> str:
 
 def _exec_knowledge_search(args):
     """知识库检索"""
-    from app.services.rag_service import search
-    results = search(args["query"])
-    if not results:
-        return json.dumps({"message": "知识库中未找到相关内容", "results": []})
-    formatted = [
-        {"source": r["filename"], "content": r["content"]}
-        for r in results
-    ]
-    return json.dumps({"results": formatted}, ensure_ascii=False)
+    try:
+        from app.services.rag_service import search
+        results = search(args["query"])
+        if not results:
+            return json.dumps({"message": "知识库中未找到相关内容", "results": []})
+        formatted = [
+            {"source": r["filename"], "content": r["content"]}
+            for r in results
+        ]
+        return json.dumps({"results": formatted}, ensure_ascii=False)
+    except Exception as e:
+        # 知识库查询失败时回滚，防止污染后续操作
+        try:
+            from app.extensions import db
+            db.session.rollback()
+        except Exception:
+            pass
+        logger.warning(f"知识库搜索失败: {e}")
+        return json.dumps({"message": "知识库搜索服务暂时不可用", "results": []})
 
 
 def _exec_code(args):
@@ -456,7 +493,8 @@ def _exec_code(args):
         os.unlink(tmp_path) if os.path.exists(tmp_path) else None
         return json.dumps({"error": f"代码执行超时（{timeout}秒）"})
     except Exception as e:
-        return json.dumps({"error": f"代码执行失败: {str(e)}"})
+        logger.warning(f"代码执行失败: {e}")
+        return json.dumps({"error": "代码执行出错", "output": "执行失败，请检查代码语法"})
 
 
 def _exec_query_database(args):
@@ -486,6 +524,9 @@ def _exec_query_database(args):
             "total": len(rows),
         }, ensure_ascii=False, default=str)
     except Exception as e:
+        # 查询失败时必须 rollback，否则后续所有 SQLAlchemy 操作都会报 InFailedSqlTransaction
+        from app.extensions import db
+        db.session.rollback()
         return json.dumps({"error": f"查询失败: {str(e)}"})
 
 

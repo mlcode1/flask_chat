@@ -7,7 +7,7 @@ load_dotenv()
 
 from app.config import Config
 from app.extensions import db
-from app.models import CodeRepository
+from app.models import CodeRepository, IndexedFile  # 导入新模型
 from app.routes.chat import chat_bp
 from app.routes.rag import rag_bp
 from app.routes.code_index import code_index_bp

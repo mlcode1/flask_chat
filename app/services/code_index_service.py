@@ -56,8 +56,29 @@ def search_code(query: str, repo_name: str = None, top_k: int = None) -> list[di
     if top_k is None:
         top_k = current_app.config.get("CODE_INDEX_TOP_K", 8)
     
-    if repo_name is None:
-        repo_name = current_app.config.get("CODE_INDEX_DEFAULT_REPO", "flask_chat")
+    if repo_name is not None:
+        # 指定了仓库名，先校验该仓库是否已索引
+        indexed_repos = list_indexed_repos()
+        if repo_name not in indexed_repos:
+            if indexed_repos:
+                logger.warning(f"仓库 '{repo_name}' 未索引，已索引的仓库: {', '.join(indexed_repos)}")
+            else:
+                logger.warning("没有找到任何已索引的代码库")
+            return []
+    else:
+        # 没有指定仓库时，自动查找已索引的仓库
+        indexed_repos = list_indexed_repos()
+        if not indexed_repos:
+            logger.warning("没有找到任何已索引的代码库")
+            return []
+        # 优先使用配置中的默认仓库，如果它已索引的话
+        default_repo = current_app.config.get("CODE_INDEX_DEFAULT_REPO", "")
+        if default_repo and default_repo in indexed_repos:
+            repo_name = default_repo
+        else:
+            # 使用第一个已索引的仓库
+            repo_name = indexed_repos[0]
+            logger.info(f"未指定仓库名，自动选择: {repo_name}")
     
     table_name = f"data_code_embeddings_{repo_name}"
     
@@ -118,6 +139,8 @@ def list_indexed_repos() -> list[str]:
     if not current_app.config.get("CODE_INDEX_ENABLED", False):
         return []
     
+    conn = None
+    cursor = None
     try:
         conn = get_code_index_db_connection()
         cursor = conn.cursor()
@@ -131,8 +154,6 @@ def list_indexed_repos() -> list[str]:
         """)
         
         tables = cursor.fetchall()
-        cursor.close()
-        conn.close()
         
         repos = [table[0].replace("data_code_embeddings_", "") for table in tables]
         return sorted(repos)
@@ -140,6 +161,18 @@ def list_indexed_repos() -> list[str]:
     except Exception as e:
         logger.error(f"获取已索引仓库列表失败: {e}")
         return []
+    finally:
+        # 确保连接和游标被正确关闭
+        if cursor:
+            try:
+                cursor.close()
+            except:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
 
 def get_repo_stats(repo_name: str) -> dict:

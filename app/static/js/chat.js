@@ -1,4 +1,5 @@
 (function () {
+    // ========== 元素引用（可能为 null，需做安全检查） ==========
     const messagesContainer = document.getElementById("messages-container");
     const messageInput = document.getElementById("message-input");
     const sendBtn = document.getElementById("send-btn");
@@ -11,25 +12,34 @@
     const verifySwitch = document.getElementById("verify-switch");
     const shareBtn = document.getElementById("share-btn");
     const exportBtn = document.getElementById("export-btn");
+    const codeRepoList = document.getElementById("code-repo-list");
+
+    // 判断当前页面类型
+    const isChatPage = !!messagesContainer;
+    const isCodeReposPage = !!codeRepoList && !isChatPage;
 
     let currentConvId = null;
     let isStreaming = false;
     let currentAbortController = null;
     let verifyEnabled = false;
 
-    loadModels();
-    loadDocuments();
-    loadVerifyConfig();
-    addDebugButton();
-
-    const activeConvs = document.querySelectorAll(".conversation-item");
-    if (activeConvs.length > 0) {
-        currentConvId = activeConvs[0].dataset.id;
-        loadMessages(currentConvId);
+    // ========== 通用函数 ==========
+    function scrollToBottom() {
+        if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
 
-    function scrollToBottom() {
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    // ========== 聊天页专用初始化 ==========
+    if (isChatPage) {
+        if (modelSelector) loadModels();
+        if (verifySwitch) loadVerifyConfig();
+        if (kbDocList) loadDocuments();
+        addDebugButton();
+
+        const activeConvs = document.querySelectorAll(".conversation-item");
+        if (activeConvs.length > 0) {
+            currentConvId = activeConvs[0].dataset.id;
+            loadMessages(currentConvId);
+        }
     }
 
     async function loadModels() {
@@ -50,6 +60,7 @@
     }
 
     async function loadVerifyConfig() {
+        if (!verifySwitch) return;
         try {
             const res = await fetch("/api/config/verify");
             const data = await res.json();
@@ -60,19 +71,21 @@
         }
     }
 
-    verifySwitch.addEventListener("change", async function() {
-        verifyEnabled = this.checked;
-        try {
-            await fetch("/api/config/verify", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ enabled: verifyEnabled })
-            });
-        } catch (e) {
-            console.error("更新验证配置失败:", e);
-            this.checked = !verifyEnabled;
-        }
-    });
+    if (verifySwitch) {
+        verifySwitch.addEventListener("change", async function() {
+            verifyEnabled = this.checked;
+            try {
+                await fetch("/api/config/verify", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ enabled: verifyEnabled })
+                });
+            } catch (e) {
+                console.error("更新验证配置失败:", e);
+                this.checked = !verifyEnabled;
+            }
+        });
+    }
 
     function addMessage(role, content, interrupted, verification, messageId, toolCalls) {
         const welcome = messagesContainer.querySelector(".welcome-message");
@@ -720,170 +733,173 @@
 
     document.querySelectorAll(".conversation-item").forEach(bindConvEvents);
 
-    newChatBtn.addEventListener("click", async function () {
-        const title = await promptForTitle();
-        if (title === null) return; // 用户取消
+    // ========== 聊天页专用功能 ==========
+    if (isChatPage) {
+        newChatBtn.addEventListener("click", async function () {
+            const title = await promptForTitle();
+            if (title === null) return; // 用户取消
 
-        const res = await fetch("/api/conversations", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(title ? { title } : {}),
-        });
-        const conv = await res.json();
-        addConvToSidebar(conv.id, conv.title);
-        currentConvId = conv.id;
-        messagesContainer.innerHTML = `
-            <div class="welcome-message">
-                <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
-                <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
-            </div>`;
-    });
-
-    // 弹窗让用户输入新对话标题；返回 null 表示取消，空字符串表示用默认
-    function promptForTitle() {
-        return new Promise((resolve) => {
-            const overlay = document.createElement("div");
-            overlay.className = "modal-overlay";
-
-            const box = document.createElement("div");
-            box.className = "modal-box";
-            box.innerHTML = `
-                <div class="modal-title">新建对话</div>
-                <input type="text" class="modal-input" placeholder="输入对话标题（留空则自动生成）" maxlength="50" />
-                <div class="modal-actions">
-                    <button class="modal-btn modal-cancel">取消</button>
-                    <button class="modal-btn modal-confirm">创建</button>
-                </div>
-            `;
-            overlay.appendChild(box);
-            document.body.appendChild(overlay);
-
-            const input = box.querySelector(".modal-input");
-            const cancelBtn = box.querySelector(".modal-cancel");
-            const confirmBtn = box.querySelector(".modal-confirm");
-
-            input.focus();
-
-            const close = (val) => {
-                overlay.remove();
-                resolve(val);
-            };
-
-            cancelBtn.addEventListener("click", () => close(null));
-            overlay.addEventListener("click", (e) => { if (e.target === overlay) close(null); });
-            input.addEventListener("keydown", (e) => {
-                if (e.key === "Enter") close(input.value);
-                else if (e.key === "Escape") close(null);
+            const res = await fetch("/api/conversations", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(title ? { title } : {}),
             });
-            confirmBtn.addEventListener("click", () => close(input.value));
+            const conv = await res.json();
+            addConvToSidebar(conv.id, conv.title);
+            currentConvId = conv.id;
+            messagesContainer.innerHTML = `
+                <div class="welcome-message">
+                    <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
+                    <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
+                </div>`;
         });
-    }
 
-    shareBtn.addEventListener("click", async function () {
-        if (!currentConvId) {
-            alert("请先选择一个对话");
-            return;
+        // 弹窗让用户输入新对话标题；返回 null 表示取消，空字符串表示用默认
+        function promptForTitle() {
+            return new Promise((resolve) => {
+                const overlay = document.createElement("div");
+                overlay.className = "modal-overlay";
+
+                const box = document.createElement("div");
+                box.className = "modal-box";
+                box.innerHTML = `
+                    <div class="modal-title">新建对话</div>
+                    <input type="text" class="modal-input" placeholder="输入对话标题（留空则自动生成）" maxlength="50" />
+                    <div class="modal-actions">
+                        <button class="modal-btn modal-cancel">取消</button>
+                        <button class="modal-btn modal-confirm">创建</button>
+                    </div>
+                `;
+                overlay.appendChild(box);
+                document.body.appendChild(overlay);
+
+                const input = box.querySelector(".modal-input");
+                const cancelBtn = box.querySelector(".modal-cancel");
+                const confirmBtn = box.querySelector(".modal-confirm");
+
+                input.focus();
+
+                const close = (val) => {
+                    overlay.remove();
+                    resolve(val);
+                };
+
+                cancelBtn.addEventListener("click", () => close(null));
+                overlay.addEventListener("click", (e) => { if (e.target === overlay) close(null); });
+                input.addEventListener("keydown", (e) => {
+                    if (e.key === "Enter") close(input.value);
+                    else if (e.key === "Escape") close(null);
+                });
+                confirmBtn.addEventListener("click", () => close(input.value));
+            });
         }
-        try {
-            const res = await fetch(`/api/conversations/${currentConvId}/share`, { method: "POST" });
-            const data = await res.json();
-            if (data.error) {
-                alert(data.error);
+
+        shareBtn.addEventListener("click", async function () {
+            if (!currentConvId) {
+                alert("请先选择一个对话");
                 return;
             }
-            const shareUrl = `${window.location.origin}/share/${data.share_token}`;
-            const toast = document.createElement("div");
-            toast.className = "share-toast";
-            toast.innerHTML = `
-                <div class="share-toast-content">
-                    <span class="share-toast-icon">🔗</span>
-                    <div class="share-toast-text">
-                        <div class="share-toast-title">分享链接已生成</div>
-                        <div class="share-toast-url">${shareUrl}</div>
+            try {
+                const res = await fetch(`/api/conversations/${currentConvId}/share`, { method: "POST" });
+                const data = await res.json();
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+                const shareUrl = `${window.location.origin}/share/${data.share_token}`;
+                const toast = document.createElement("div");
+                toast.className = "share-toast";
+                toast.innerHTML = `
+                    <div class="share-toast-content">
+                        <span class="share-toast-icon">🔗</span>
+                        <div class="share-toast-text">
+                            <div class="share-toast-title">分享链接已生成</div>
+                            <div class="share-toast-url">${shareUrl}</div>
+                        </div>
                     </div>
-                </div>
-            `;
-            document.body.appendChild(toast);
-            setTimeout(() => toast.remove(), 5000);
-            navigator.clipboard.writeText(shareUrl).catch(() => {});
-        } catch (e) {
-            console.error("分享失败:", e);
-            alert("分享失败，请稍后重试");
-        }
-    });
-
-    exportBtn.addEventListener("click", function () {
-        if (!currentConvId) {
-            alert("请先选择一个对话");
-            return;
-        }
-        const existing = document.querySelector(".export-menu");
-        if (existing) {
-            existing.remove();
-            return;
-        }
-        const menu = document.createElement("div");
-        menu.className = "export-menu";
-        menu.innerHTML = `
-            <div class="export-menu-title">导出对话</div>
-            <button class="export-option" data-format="markdown">
-                <span class="export-icon">📝</span>
-                <span>Markdown (.md)</span>
-            </button>
-            <button class="export-option" data-format="json">
-                <span class="export-icon">📊</span>
-                <span>JSON (.json)</span>
-            </button>
-            <button class="export-option" data-format="txt">
-                <span class="export-icon">📄</span>
-                <span>纯文本 (.txt)</span>
-            </button>
-        `;
-        document.body.appendChild(menu);
-        menu.querySelectorAll(".export-option").forEach(btn => {
-            btn.addEventListener("click", async function () {
-                const format = this.dataset.format;
-                try {
-                    const res = await fetch(`/api/conversations/${currentConvId}/export?format=${format}`);
-                    if (!res.ok) throw new Error("导出失败");
-                    const blob = await res.blob();
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = `conversation_${currentConvId}.${format === "markdown" ? "md" : format}`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                    menu.remove();
-                } catch (e) {
-                    console.error("导出失败:", e);
-                    alert("导出失败，请稍后重试");
-                }
-            });
+                `;
+                document.body.appendChild(toast);
+                setTimeout(() => toast.remove(), 5000);
+                navigator.clipboard.writeText(shareUrl).catch(() => {});
+            } catch (e) {
+                console.error("分享失败:", e);
+                alert("分享失败，请稍后重试");
+            }
         });
-        setTimeout(() => {
-            document.addEventListener("click", function closeMenu(e) {
-                if (!menu.contains(e.target) && e.target !== exportBtn) {
-                    menu.remove();
-                    document.removeEventListener("click", closeMenu);
-                }
+
+        exportBtn.addEventListener("click", function () {
+            if (!currentConvId) {
+                alert("请先选择一个对话");
+                return;
+            }
+            const existing = document.querySelector(".export-menu");
+            if (existing) {
+                existing.remove();
+                return;
+            }
+            const menu = document.createElement("div");
+            menu.className = "export-menu";
+            menu.innerHTML = `
+                <div class="export-menu-title">导出对话</div>
+                <button class="export-option" data-format="markdown">
+                    <span class="export-icon">📝</span>
+                    <span>Markdown (.md)</span>
+                </button>
+                <button class="export-option" data-format="json">
+                    <span class="export-icon">📊</span>
+                    <span>JSON (.json)</span>
+                </button>
+                <button class="export-option" data-format="txt">
+                    <span class="export-icon">📄</span>
+                    <span>纯文本 (.txt)</span>
+                </button>
+            `;
+            document.body.appendChild(menu);
+            menu.querySelectorAll(".export-option").forEach(btn => {
+                btn.addEventListener("click", async function () {
+                    const format = this.dataset.format;
+                    try {
+                        const res = await fetch(`/api/conversations/${currentConvId}/export?format=${format}`);
+                        if (!res.ok) throw new Error("导出失败");
+                        const blob = await res.blob();
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `conversation_${currentConvId}.${format === "markdown" ? "md" : format}`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                        menu.remove();
+                    } catch (e) {
+                        console.error("导出失败:", e);
+                        alert("导出失败，请稍后重试");
+                    }
+                });
             });
-        }, 0);
-    });
+            setTimeout(() => {
+                document.addEventListener("click", function closeMenu(e) {
+                    if (!menu.contains(e.target) && e.target !== exportBtn) {
+                        menu.remove();
+                        document.removeEventListener("click", closeMenu);
+                    }
+                });
+            }, 0);
+        });
 
-    sendBtn.addEventListener("click", sendMessage);
-    interruptBtn.addEventListener("click", interrupt);
+        sendBtn.addEventListener("click", sendMessage);
+        interruptBtn.addEventListener("click", interrupt);
 
-    messageInput.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
-    });
+        messageInput.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
 
-    messageInput.addEventListener("input", function () {
-        this.style.height = "auto";
-        this.style.height = Math.min(this.scrollHeight, 120) + "px";
-    });
+        messageInput.addEventListener("input", function () {
+            this.style.height = "auto";
+            this.style.height = Math.min(this.scrollHeight, 120) + "px";
+        });
+    }
 
     async function loadDocuments() {
         try {
@@ -923,40 +939,41 @@
         });
     }
 
-    fileUpload.addEventListener("change", async function () {
-        const file = this.files[0];
-        if (!file) return;
-        this.value = "";
+    if (fileUpload && kbDocList) {
+        fileUpload.addEventListener("change", async function () {
+            const file = this.files[0];
+            if (!file) return;
+            this.value = "";
 
-        kbDocList.innerHTML = `
-            <div class="kb-uploading">
-                正在处理 ${file.name}...
-                <div class="upload-progress"><div class="upload-progress-bar"></div></div>
-            </div>
-        `;
+            kbDocList.innerHTML = `
+                <div class="kb-uploading">
+                    正在处理 ${file.name}...
+                    <div class="upload-progress"><div class="upload-progress-bar"></div></div>
+                </div>
+            `;
 
-        const formData = new FormData();
-        formData.append("file", file);
+            const formData = new FormData();
+            formData.append("file", file);
 
-        try {
-            const res = await fetch("/api/documents/upload", {
-                method: "POST",
-                body: formData,
-            });
-            const data = await res.json();
-            if (!res.ok) {
-                alert(data.error || "上传失败");
+            try {
+                const res = await fetch("/api/documents/upload", {
+                    method: "POST",
+                    body: formData,
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    alert(data.error || "上传失败");
+                }
+                loadDocuments();
+            } catch (e) {
+                alert("上传失败: " + e.message);
+                loadDocuments();
             }
-            loadDocuments();
-        } catch (e) {
-            alert("上传失败: " + e.message);
-            loadDocuments();
-        }
-    });
+        });
+    }
 
     // ==================== 代码库索引管理 ====================
     const addRepoBtn = document.getElementById("add-repo-btn");
-    const codeRepoList = document.getElementById("code-repo-list");
     const addRepoModal = document.getElementById("add-repo-modal");
     const searchTestModal = document.getElementById("search-test-modal");
     const confirmModal = document.getElementById("confirm-modal");
@@ -1008,6 +1025,44 @@
             
             confirmOk.addEventListener('click', handleOk);
             confirmCancel.addEventListener('click', handleCancel);
+        });
+    }
+
+    // 索引模式选择弹窗函数
+    function showIndexModeConfirm(isPending) {
+        return new Promise((resolve) => {
+            const indexModeModal = document.getElementById('index-mode-modal');
+            const indexModeOk = document.getElementById('index-mode-ok');
+            const indexModeCancel = document.getElementById('index-mode-cancel');
+            
+            // 如果是待索引状态，默认选中增量；否则默认选中全量
+            const defaultMode = isPending ? 'incremental' : 'full';
+            document.querySelector(`input[name="index-mode"][value="${defaultMode}"]`).checked = true;
+            
+            indexModeModal.style.display = 'flex';
+            
+            const handleOk = () => {
+                const selectedMode = document.querySelector('input[name="index-mode"]:checked').value;
+                indexModeModal.style.display = 'none';
+                indexModeOk.removeEventListener('click', handleOk);
+                indexModeCancel.removeEventListener('click', handleCancel);
+                
+                // 全量模式时 reindex=true，增量模式时 reindex=false
+                resolve({
+                    mode: selectedMode,
+                    reindex: selectedMode === 'full'
+                });
+            };
+            
+            const handleCancel = () => {
+                indexModeModal.style.display = 'none';
+                indexModeOk.removeEventListener('click', handleOk);
+                indexModeCancel.removeEventListener('click', handleCancel);
+                resolve(null);
+            };
+            
+            indexModeOk.addEventListener('click', handleOk);
+            indexModeCancel.addEventListener('click', handleCancel);
         });
     }
 
@@ -1172,14 +1227,10 @@
                 const statusBadge = repoItem.querySelector('.repo-status-badge');
                 const isPending = statusBadge && statusBadge.classList.contains('status-pending');
                 
-                const title = isPending ? '构建索引' : '重新索引';
-                const message = isPending 
-                    ? '确定要对此代码库构建索引吗？' 
-                    : '确定要重新索引此代码库吗？这将清空现有索引并重新构建。';
-                
-                const confirmed = await showConfirm(title, message);
-                if (confirmed) {
-                    await triggerIndex(repoId);
+                // 显示索引模式选择弹窗
+                const result = await showIndexModeConfirm(isPending);
+                if (result) {
+                    await triggerIndex(repoId, result.mode, result.reindex);
                 }
             });
         });
@@ -1266,17 +1317,18 @@
     }
 
     // 触发索引
-    async function triggerIndex(repoId) {
+    async function triggerIndex(repoId, mode = 'full', reindex = true) {
         try {
             const res = await fetch(`/api/code-repos/${repoId}/index`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ reindex: true })
+                body: JSON.stringify({ mode, reindex })
             });
             const data = await res.json();
-
+            
             if (data.status === 'success') {
-                showToast('索引任务已启动', 'success');
+                const modeText = mode === 'full' ? '全量' : '增量';
+                showToast(`${modeText}索引任务已启动`, 'success');
                 loadCodeRepos(); // 刷新列表以显示进度条
             } else {
                 showToast(data.message || '索引失败', 'error');
@@ -1383,7 +1435,56 @@
         return div.innerHTML;
     }
 
-    // 初始加载
-    loadCodeRepos();
+    // 加载知识库文档数量（用于主页导航徽章）
+    async function loadKnowledgeCount() {
+        try {
+            const response = await fetch('/api/documents');
+            const data = await response.json();
+            // API 直接返回数组
+            const count = Array.isArray(data) ? data.length : (data.documents ? data.documents.length : 0);
+            const badge = document.getElementById('knowledge-count');
+            if (badge) {
+                badge.textContent = count;
+            }
+        } catch (error) {
+            console.error('加载知识库数量失败:', error);
+        }
+    }
+
+    // 加载代码库数量（用于主页导航徽章）
+    async function loadCodeReposCount() {
+        try {
+            const response = await fetch('/api/code-repos');
+            const data = await response.json();
+            const count = data.repos ? data.repos.length : 0;
+            const badge = document.getElementById('code-repos-count');
+            if (badge) {
+                badge.textContent = count;
+            }
+        } catch (error) {
+            console.error('加载代码库数量失败:', error);
+        }
+    }
+
+    // 初始加载（按页面类型）
+    if (isCodeReposPage && codeRepoList) {
+        loadCodeRepos();
+    }
+    if (isChatPage) {
+        loadKnowledgeCount();
+        loadCodeReposCount();
+    }
+
+    // 暴露给其他页面使用
+    window.loadCodeRepos = loadCodeRepos;
+    window.loadDocuments = loadDocuments;
+    // 暴露到全局作用域，供独立页面调用
+    window.loadCodeRepos = loadCodeRepos;
+    window.showToast = showToast;
+    window.showConfirm = showConfirm;
+    window.showIndexModeConfirm = showIndexModeConfirm;
+    window.triggerIndex = triggerIndex;
+    window.deleteRepo = deleteRepo;
+    window.cancelIndex = cancelIndex;
 
 })();

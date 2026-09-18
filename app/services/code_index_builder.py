@@ -4,9 +4,11 @@ Code Index Builder Service - 代码库索引构建服务
 """
 import os
 import re
+import hashlib
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
+from datetime import datetime, timezone
 
 from llama_index.core import (
     VectorStoreIndex,
@@ -67,14 +69,115 @@ def sanitize_sensitive_content(text: str) -> str:
     return text
 
 
-def build_index(repo_name: str, repo_path: str, reindex: bool = True, progress_callback=None):
+def calculate_file_hash(file_path: str) -> str:
+    """计算文件的 SHA256 哈希值"""
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+
+def get_file_info(file_path: str, base_path: str) -> Dict:
+    """获取文件的元数据信息"""
+    path = Path(file_path)
+    stat = path.stat()
+    
+    return {
+        'file_path': str(path.relative_to(base_path)),
+        'content_hash': calculate_file_hash(file_path),
+        'file_size': stat.st_size,
+        'last_modified_time': datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+    }
+
+
+def scan_files_for_incremental(repo_id: int, repo_path: str, supported_exts: List[str], 
+                                exclude_patterns: List[str]) -> Tuple[List[Dict], List[str], List[str]]:
+    """
+    扫描文件并确定增量索引需要的操作
+    
+    Returns:
+        - files_to_index: 需要索引的文件列表
+        - files_to_delete: 需要删除的文件路径列表
+        - files_skipped: 跳过的文件路径列表
+    """
+    from app.models import IndexedFile, db
+    
+    # 1. 扫描文件系统
+    base_path = Path(repo_path)
+    current_files = {}
+    
+    for ext in supported_exts:
+        for file_path in base_path.rglob(f"*{ext}"):
+            # 检查是否在排除列表中
+            rel_path = file_path.relative_to(base_path)
+            if any(pattern in str(rel_path) for pattern in exclude_patterns):
+                continue
+            
+            try:
+                file_info = get_file_info(str(file_path), repo_path)
+                current_files[file_info['file_path']] = file_info
+            except Exception as e:
+                logger.warning(f"无法读取文件 {file_path}: {e}")
+    
+    # 2. 查询数据库中的索引记录
+    indexed_records = IndexedFile.query.filter_by(repo_id=repo_id).all()
+    indexed_map = {record.file_path: record for record in indexed_records}
+    
+    # 3. 比较确定操作
+    files_to_index = []
+    files_skipped = []
+    files_to_delete = []
+    
+    for file_path, file_info in current_files.items():
+        if file_path not in indexed_map:
+            # 新文件，需要索引
+            files_to_index.append(file_info)
+        else:
+            # 已存在的文件，检查是否有变化
+            indexed_record = indexed_map[file_path]
+            if indexed_record.content_hash != file_info['content_hash']:
+                # 内容已变化，需要重新索引
+                files_to_index.append(file_info)
+            else:
+                # 内容未变化，跳过
+                files_skipped.append(file_path)
+    
+    # 4. 检查已删除的文件
+    for file_path in indexed_map.keys():
+        if file_path not in current_files:
+            files_to_delete.append(file_path)
+    
+    return files_to_index, files_to_delete, files_skipped
+
+
+def delete_indexed_files(repo_id: int, file_paths: List[str]):
+    """从向量存储中删除指定文件的索引"""
+    from app.models import IndexedFile, db
+    
+    if not file_paths:
+        return
+    
+    # 删除数据库记录（级联删除向量存储中的数据）
+    for file_path in file_paths:
+        record = IndexedFile.query.filter_by(repo_id=repo_id, file_path=file_path).first()
+        if record:
+            db.session.delete(record)
+    
+    db.session.commit()
+    logger.info(f"已删除 {len(file_paths)} 个文件的索引")
+
+
+def build_index(repo_id: int, repo_name: str, repo_path: str, reindex: bool = True, mode: str = 'full', progress_callback=None):
     """
     构建代码库索引
     
     Args:
+        repo_id: 仓库ID
         repo_name: 仓库名称（用于表名）
         repo_path: 仓库路径
         reindex: 是否重新索引（默认清空已有索引）
+        mode: 索引模式 - 'full' 全量索引，'incremental' 增量索引
         progress_callback: 进度回调函数 callback(progress: int, message: str)
     
     Returns:
@@ -86,7 +189,7 @@ def build_index(repo_name: str, repo_path: str, reindex: bool = True, progress_c
     
     try:
         _report_progress(2, '验证仓库路径...')
-        logger.info(f"开始构建索引: {repo_name} ({repo_path})")
+        logger.info(f"开始构建索引: {repo_name} ({repo_path}), 模式: {mode}")
 
         # 验证路径存在
         path = Path(repo_path)
@@ -140,16 +243,85 @@ def build_index(repo_name: str, repo_path: str, reindex: bool = True, progress_c
         except Exception as e:
             logger.warning(f"无法初始化 CodeSplitter，将使用默认分割器: {e}")
 
-        _report_progress(10, '读取代码文件...')
-        # 读取代码文件
-        reader = SimpleDirectoryReader(
-            input_dir=repo_path,
-            recursive=True,
-            required_exts=supported_exts,
-            exclude_hidden=True,
-            exclude=exclude_patterns,
-        )
-        documents = reader.load_data()
+        # 增量索引模式
+        if mode == 'incremental' and not reindex:
+            _report_progress(10, '扫描文件变化...')
+            files_to_index, files_to_delete, files_skipped = scan_files_for_incremental(
+                repo_id, repo_path, supported_exts, exclude_patterns
+            )
+            
+            _report_progress(12, f'发现 {len(files_to_index)} 个新增/修改文件, {len(files_to_delete)} 个删除文件')
+            
+            # 删除已移除的文件
+            if files_to_delete:
+                delete_indexed_files(repo_id, files_to_delete)
+            
+            # 如果没有需要索引的文件
+            if not files_to_index:
+                _report_progress(100, '没有文件需要索引')
+                return {
+                    'status': 'success',
+                    'repo_name': repo_name,
+                    'file_count': 0,
+                    'chunk_count': 0,
+                    'sanitized_count': 0,
+                    'mode': 'incremental',
+                    'files_added': 0,
+                    'files_modified': len(files_to_index),
+                    'files_deleted': len(files_to_delete),
+                    'files_skipped': len(files_skipped)
+                }
+            
+            # 读取需要索引的文件
+            _report_progress(14, '读取需要索引的文件...')
+            documents = []
+            for file_info in files_to_index:
+                full_path = os.path.join(repo_path, file_info['file_path'])
+                try:
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    
+                    doc = Document(
+                        text=content,
+                        metadata={
+                            'repo': repo_name,
+                            'file_path': file_info['file_path'],
+                            'file_name': os.path.basename(file_info['file_path'])
+                        }
+                    )
+                    documents.append(doc)
+                except Exception as e:
+                    logger.warning(f"无法读取文件 {full_path}: {e}")
+            
+            if not documents:
+                _report_progress(100, '没有有效的文件内容')
+                return {
+                    'status': 'success',
+                    'repo_name': repo_name,
+                    'file_count': 0,
+                    'chunk_count': 0,
+                    'sanitized_count': 0,
+                    'mode': 'incremental',
+                    'files_added': 0,
+                    'files_modified': len(files_to_index),
+                    'files_deleted': len(files_to_delete),
+                    'files_skipped': len(files_skipped)
+                }
+        else:
+            # 全量索引模式
+            _report_progress(10, '读取代码文件...')
+            # 读取代码文件
+            reader = SimpleDirectoryReader(
+                input_dir=repo_path,
+                recursive=True,
+                required_exts=supported_exts,
+                exclude_hidden=True,
+                exclude=exclude_patterns,
+            )
+            documents = reader.load_data()
+            files_to_index = []
+            files_to_delete = []
+            files_skipped = []
 
         if not documents:
             raise ValueError("未找到符合条件的代码文件")
@@ -274,12 +446,47 @@ def build_index(repo_name: str, repo_path: str, reindex: bool = True, progress_c
 
         logger.info(f"索引构建完成: {len(sanitized_documents)} 个文件, {num_chunks} 个分块")
 
+        # 更新 IndexedFile 表记录（增量索引模式下）
+        if mode == 'incremental' and not reindex and files_to_index:
+            from app.models import IndexedFile, db
+            for file_info in files_to_index:
+                existing = IndexedFile.query.filter_by(
+                    repo_id=repo_id, 
+                    file_path=file_info['file_path']
+                ).first()
+                
+                if existing:
+                    # 更新已有记录
+                    existing.content_hash = file_info['content_hash']
+                    existing.file_size = file_info['file_size']
+                    existing.last_modified_time = file_info['last_modified_time']
+                    existing.last_indexed_time = datetime.utcnow()
+                else:
+                    # 创建新记录
+                    new_record = IndexedFile(
+                        repo_id=repo_id,
+                        file_path=file_info['file_path'],
+                        content_hash=file_info['content_hash'],
+                        file_size=file_info['file_size'],
+                        last_modified_time=file_info['last_modified_time'],
+                        last_indexed_time=datetime.utcnow()
+                    )
+                    db.session.add(new_record)
+            
+            db.session.commit()
+            logger.info(f"已更新 {len(files_to_index)} 条 IndexedFile 记录")
+
         return {
             'status': 'success',
             'repo_name': repo_name,
             'file_count': len(sanitized_documents),
             'chunk_count': num_chunks,
             'sanitized_count': sanitized_count,
+            'mode': mode,
+            'files_added': len([f for f in files_to_index if f not in [skip for skip in files_skipped]]),
+            'files_modified': len(files_to_index),
+            'files_deleted': len(files_to_delete),
+            'files_skipped': len(files_skipped)
         }
 
     except Exception as e:
