@@ -82,3 +82,10 @@ class Config:
     CODE_INDEX_EMBED_MODEL =  os.getenv("EMBEDDING_MODEL", "qwen3-embedding:8b")
     CODE_INDEX_DEFAULT_REPO = os.getenv("CODE_INDEX_DEFAULT_REPO", "flask_chat")
     CODE_INDEX_TOP_K = int(os.getenv("CODE_INDEX_TOP_K", "5"))
+
+    # Code Index Builder (索引构建配置)
+    CODE_INDEX_CHUNK_LINES = int(os.getenv("CODE_INDEX_CHUNK_LINES", "100"))
+    CODE_INDEX_CHUNK_LINES_OVERLAP = int(os.getenv("CODE_INDEX_CHUNK_LINES_OVERLAP", "10"))
+    CODE_INDEX_MAX_CHARS = int(os.getenv("CODE_INDEX_MAX_CHARS", "1500"))
+    CODE_INDEX_SUPPORTED_EXTS = [ext.strip() for ext in os.getenv("CODE_INDEX_SUPPORTED_EXTS", ".py,.js,.ts,.tsx,.jsx,.java,.go,.rs,.cpp,.c,.h,.md,.txt,.json,.yaml,.yml").split(",")]
+    CODE_INDEX_EXCLUDE_PATTERNS = [pattern.strip() for pattern in os.getenv("CODE_INDEX_EXCLUDE_PATTERNS", ".git,__pycache__,node_modules,venv,.venv,dist,build,*.pyc,.DS_Store").split(",")]

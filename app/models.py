@@ -113,3 +113,36 @@ class AuditLog(db.Model):
     conversation_id = db.Column(db.Integer, nullable=True)
     detail = db.Column(db.Text, default="")                      # JSON 或描述文本
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class CodeRepository(db.Model):
+    """代码仓库配置"""
+    __tablename__ = "code_repositories"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False, index=True)  # 仓库别名（如 flask_chat）
+    path = db.Column(db.String(500), nullable=False)            # 本地路径（绝对路径）
+    status = db.Column(db.String(20), default="pending")        # pending/indexing/indexed/failed
+    chunk_count = db.Column(db.Integer, default=0)              # 分块数量
+    file_count = db.Column(db.Integer, default=0)               # 文件数量
+    error_message = db.Column(db.Text, nullable=True)           # 错误信息
+    last_indexed_at = db.Column(db.DateTime, nullable=True)     # 最后索引时间
+    progress = db.Column(db.Integer, default=0)                 # 索引进度（0-100）
+    progress_message = db.Column(db.Text, nullable=True)        # 进度消息
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        """序列化为字典"""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "path": self.path,
+            "status": self.status,
+            "chunk_count": self.chunk_count,
+            "file_count": self.file_count,
+            "error_message": self.error_message,
+            "last_indexed_at": self.last_indexed_at.isoformat() if self.last_indexed_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
