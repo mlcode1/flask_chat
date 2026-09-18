@@ -14,6 +14,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 - **流式输出** — 基于 Server-Sent Events（SSE）实现逐字流式响应
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
 - **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、数据库查询、文件读取、知识库检索、网页搜索等工具；`web_search` 支持 Tavily / Bing / DuckDuckGo 多源自动切换
+- **工具开关控制** — 知识库查询和代码库查询工具可通过页面顶部开关实时启用/禁用，无需重启服务
 - **RAG 知识检索** — 上传文档后，AI 可通过工具调用自动检索知识库回答问题；支持 BM25 + 向量混合检索、多查询重写、结果重排序
 - **代码库索引管理** — 通过 Web UI 管理代码仓库配置（名称 + 本地路径），支持全量构建与增量构建（混合方案：文件修改时间 + SHA256 哈希双重过滤），构建过程实时进度条，支持取消任务；AI 在对话中通过 `search_code` 工具自动检索相关代码片段，自动选择已索引仓库
 - **本地模型支持** — 通过 Ollama 可直接使用本地部署的大语言模型和 Embedding 模型，无需任何云服务；Embedding 也可接入第三方服务
@@ -187,6 +188,7 @@ cp .env.example .env
 | `WEB_SEARCH_PROVIDER` | 网页搜索提供商（tavily / bing / duckduckgo） | `duckduckgo` |
 | `TAVILY_API_KEY` | Tavily API Key（可选，最稳定） | 空 |
 | `CODE_EXEC_ENABLED` | 是否启用代码执行工具 | `true` |
+| `KNOWLEDGE_SEARCH_ENABLED` | 是否启用知识库检索工具（可在页面切换） | `false` |
 | `API_KEY` | API 鉴权密钥（留空则跳过鉴权） | 空 |
 | `INPUT_FILTER_ENABLED` | 是否启用 Prompt Injection 输入过滤 | `true` |
 | `RATELIMIT_STORAGE_URL` | API 限流存储后端（`memory://` 或 `redis://host:port`） | `memory://` |
@@ -400,6 +402,13 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 | `POST` | `/api/config/verify` | 更新结果验证开关（请求体：`{"enabled": true/false}`） |
 | `POST` | `/api/conversations/<id>/messages/<mid>/verify` | 手动触发对某条回答的验证 |
 
+#### 工具配置
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/config/tools` | 获取工具开关状态（知识库查询、代码库查询） |
+| `POST` | `/api/config/tools` | 更新工具开关（请求体：`{"knowledge_search": true/false, "code_index": true/false}`） |
+
 #### 分享与导出
 
 | 方法 | 路径 | 说明 |
@@ -475,6 +484,7 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Streaming Output** — Token-by-token streaming responses via Server-Sent Events (SSE)
 - **Stream Interruption** — Stop AI generation at any time
 - **Tool Calling** — Function Calling with built-in tools: current time, math calculation, code execution, database query, file reading, knowledge-base search, web search; `web_search` supports Tavily / Bing / DuckDuckGo with automatic fallback
+- **Tool Toggle Control** — Knowledge base search and code repository search tools can be enabled/disabled in real-time via header toggles, no service restart required
 - **RAG Knowledge Base** — Upload documents and let the AI automatically search the knowledge base when answering questions; supports BM25 + vector hybrid search, multi-query rewriting, and result reranking
 - **Code Index Management** — Manage code repository configurations via Web UI (name + local path), supports full and incremental indexing (hybrid approach: file mtime + SHA256 hash double filtering), real-time progress bar during indexing, task cancellation; AI automatically retrieves relevant code snippets during conversation through the `search_code` tool with automatic repo selection
 - **Local Model Support** — Run both LLM and Embedding models locally via Ollama, no cloud service required; embedding can also use a third-party service
@@ -648,6 +658,7 @@ Key configuration options:
 | `WEB_SEARCH_PROVIDER` | Web search provider (tavily / bing / duckduckgo) | `duckduckgo` |
 | `TAVILY_API_KEY` | Tavily API key (optional, most stable) | empty |
 | `CODE_EXEC_ENABLED` | Enable code execution tool | `true` |
+| `KNOWLEDGE_SEARCH_ENABLED` | Enable knowledge base search tool (toggleable in UI) | `false` |
 | `API_KEY` | API authentication key (empty = skip auth) | empty |
 | `INPUT_FILTER_ENABLED` | Enable Prompt Injection input filtering | `true` |
 | `RATELIMIT_STORAGE_URL` | Rate limit storage backend (`memory://` or `redis://host:port`) | `memory://` |
@@ -860,6 +871,13 @@ The code index management feature allows users to configure local code repositor
 | `GET` | `/api/config/verify` | Get result verification configuration |
 | `POST` | `/api/config/verify` | Toggle result verification (`{"enabled": true/false}`) |
 | `POST` | `/api/conversations/<id>/messages/<mid>/verify` | Manually trigger verification for a message |
+
+#### Tool Configuration
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/config/tools` | Get tool toggle status (knowledge search, code index) |
+| `POST` | `/api/config/tools` | Update tool toggles (`{"knowledge_search": true/false, "code_index": true/false}`) |
 
 #### Sharing & Export
 

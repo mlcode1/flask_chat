@@ -10,6 +10,8 @@
     const fileUpload = document.getElementById("file-upload");
     const kbDocList = document.getElementById("kb-doc-list");
     const verifySwitch = document.getElementById("verify-switch");
+    const knowledgeSearchSwitch = document.getElementById("knowledge-search-switch");
+    const codeIndexSwitch = document.getElementById("code-index-switch");
     const shareBtn = document.getElementById("share-btn");
     const exportBtn = document.getElementById("export-btn");
     const codeRepoList = document.getElementById("code-repo-list");
@@ -32,6 +34,7 @@
     if (isChatPage) {
         if (modelSelector) loadModels();
         if (verifySwitch) loadVerifyConfig();
+        loadToolsConfig();
         if (kbDocList) loadDocuments();
         addDebugButton();
 
@@ -69,6 +72,48 @@
         } catch (e) {
             console.error("加载验证配置失败:", e);
         }
+    }
+
+    async function loadToolsConfig() {
+        if (!knowledgeSearchSwitch && !codeIndexSwitch) return;
+        try {
+            const res = await fetch("/api/config/tools");
+            const data = await res.json();
+            if (knowledgeSearchSwitch) knowledgeSearchSwitch.checked = data.knowledge_search;
+            if (codeIndexSwitch) codeIndexSwitch.checked = data.code_index;
+        } catch (e) {
+            console.error("加载工具配置失败:", e);
+        }
+    }
+
+    if (knowledgeSearchSwitch) {
+        knowledgeSearchSwitch.addEventListener("change", async function() {
+            try {
+                await fetch("/api/config/tools", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ knowledge_search: this.checked })
+                });
+            } catch (e) {
+                console.error("更新知识库查询配置失败:", e);
+                this.checked = !this.checked;
+            }
+        });
+    }
+
+    if (codeIndexSwitch) {
+        codeIndexSwitch.addEventListener("change", async function() {
+            try {
+                await fetch("/api/config/tools", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ code_index: this.checked })
+                });
+            } catch (e) {
+                console.error("更新代码库查询配置失败:", e);
+                this.checked = !this.checked;
+            }
+        });
     }
 
     if (verifySwitch) {
@@ -440,11 +485,13 @@
 
         const bubble = document.createElement("div");
         bubble.className = "message-bubble";
+        
+        // 显示"正在回复中..."占位文本
+        const loadingText = document.createElement("span");
+        loadingText.className = "loading-text";
+        loadingText.textContent = "正在回复中...";
+        bubble.appendChild(loadingText);
 
-        const cursor = document.createElement("span");
-        cursor.className = "typing-cursor";
-
-        bubble.appendChild(cursor);
         row.appendChild(avatar);
         row.appendChild(bubble);
         messagesContainer.appendChild(row);
@@ -568,9 +615,16 @@
                         }
 
                         if (data.error) {
-                            const cursor = bubble.querySelector(".typing-cursor");
-                            if (cursor) cursor.remove();
-                            bubble.innerHTML = `<span style="color:var(--danger)">错误: ${data.error}</span>`;
+                            bubble.innerHTML = `
+                                <div class="error-state">
+                                    <span style="color:var(--danger)">回复失败，请重试</span>
+                                    <button class="retry-btn">重试</button>
+                                </div>`;
+                            bubble.querySelector(".retry-btn").onclick = () => {
+                                bubble.parentElement.remove();
+                                messageInput.value = content;
+                                sendMessage();
+                            };
                         }
                     } catch (e) {
                         // skip malformed lines
@@ -579,9 +633,16 @@
             }
         } catch (e) {
             if (e.name !== "AbortError") {
-                const cursor = bubble.querySelector(".typing-cursor");
-                if (cursor) cursor.remove();
-                bubble.innerHTML = `<span style="color:var(--danger)">请求失败: ${e.message}</span>`;
+                bubble.innerHTML = `
+                    <div class="error-state">
+                        <span style="color:var(--danger)">请求失败，请重试</span>
+                        <button class="retry-btn">重试</button>
+                    </div>`;
+                bubble.querySelector(".retry-btn").onclick = () => {
+                    bubble.parentElement.remove();
+                    messageInput.value = content;
+                    sendMessage();
+                };
             }
         } finally {
             isStreaming = false;

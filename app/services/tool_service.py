@@ -42,8 +42,12 @@ def _build_tools_list():
                     "required": ["expression"]
                 }
             }
-        },
-        {
+        }
+    ]
+
+    # 知识库检索（按配置决定是否启用）
+    if current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False):
+        tools.append({
             "type": "function",
             "function": {
                 "name": "knowledge_search",
@@ -59,8 +63,7 @@ def _build_tools_list():
                     "required": ["query"]
                 }
             }
-        }
-    ]
+        })
 
     # 代码库搜索（按配置决定是否启用）
     if current_app.config.get("CODE_INDEX_ENABLED", False):
@@ -167,14 +170,9 @@ def _build_tools_list():
     return tools
 
 
-# 工具列表（延迟初始化，避免 Flask 应用上下文问题）
-_TOOLS_CACHE = None
-
 def get_tools():
-    global _TOOLS_CACHE
-    if _TOOLS_CACHE is None:
-        _TOOLS_CACHE = _build_tools_list()
-    return _TOOLS_CACHE
+    """获取工具列表（每次调用都重新构建，以支持运行时开关）"""
+    return _build_tools_list()
 
 
 def execute_tool(name, arguments):

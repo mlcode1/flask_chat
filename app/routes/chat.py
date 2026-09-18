@@ -86,6 +86,27 @@ def update_verify_config():
     })
 
 
+@chat_bp.route("/api/config/tools")
+def get_tools_config():
+    return jsonify({
+        "knowledge_search": current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False),
+        "code_index": current_app.config.get("CODE_INDEX_ENABLED", False),
+    })
+
+
+@chat_bp.route("/api/config/tools", methods=["POST"])
+def update_tools_config():
+    data = request.get_json()
+    if "knowledge_search" in data:
+        current_app.config["KNOWLEDGE_SEARCH_ENABLED"] = bool(data["knowledge_search"])
+    if "code_index" in data:
+        current_app.config["CODE_INDEX_ENABLED"] = bool(data["code_index"])
+    return jsonify({
+        "knowledge_search": current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False),
+        "code_index": current_app.config.get("CODE_INDEX_ENABLED", False),
+    })
+
+
 @chat_bp.route("/api/config/disclaimer")
 def get_disclaimer_config():
     return jsonify({"text": current_app.config.get("AI_DISCLAIMER_TEXT", "")})

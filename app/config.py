@@ -70,6 +70,9 @@ class Config:
     VERIFY_ENABLED = os.getenv("VERIFY_ENABLED", "false").lower() == "true"
     VERIFY_MODEL = os.getenv("VERIFY_MODEL", "")
 
+    # Knowledge Search (知识库检索工具)
+    KNOWLEDGE_SEARCH_ENABLED = os.getenv("KNOWLEDGE_SEARCH_ENABLED", "false").lower() == "true"
+
     # Code Index (代码索引集成)
     CODE_INDEX_ENABLED = os.getenv("CODE_INDEX_ENABLED", "false").lower() == "true"
     CODE_INDEX_DB_HOST = os.getenv("CODE_INDEX_DB_HOST", "localhost")
