@@ -255,11 +255,20 @@ def generate_file_summary(file_path: str, content: str, client: OpenAI, model: s
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
+            max_tokens=1000,  # reasoning 模型需要更多 tokens（推理 + 输出）
         )
-        summary = response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("LLM 返回空内容")
+        
+        summary = content.strip()
         # 清理摘要，移除多余空白
         summary = re.sub(r'\s+', ' ', summary)
+        
+        # 如果清理后还是空，走降级逻辑
+        if not summary:
+            raise ValueError("LLM 返回空白内容")
+        
         return summary
     except Exception as e:
         logger.warning(f"生成文件摘要失败 {file_path}: {e}")
