@@ -352,6 +352,8 @@ def chat(cid):
 
     def generate():
         full = ""
+        last_save_len = 0  # 上次保存时的内容长度
+        tool_calls_log = []  # 提前初始化，避免 finally 块引用时报 NameError
 
         # 缓存命中：直接返回缓存结果
         if cached_response:
@@ -374,8 +376,19 @@ def chat(cid):
             ai = AIService(model=model)
 
             def on_chunk(text):
-                nonlocal full
+                nonlocal full, last_save_len
                 full += text
+                # 实时保存：每收到 save_interval 字符保存一次，防止断开丢失
+                # 增加到2000字符，减少数据库操作频率
+                if len(full) - last_save_len >= 2000:
+                    try:
+                        msg = db.session.get(Message, msg_id)
+                        if msg:
+                            msg.content = full
+                            db.session.commit()
+                            last_save_len = len(full)
+                    except Exception:
+                        pass
 
             def on_tool_call(tc, result):
                 """工具调用时通过 SSE 发送事件"""
@@ -392,9 +405,23 @@ def chat(cid):
                 }
                 tool_calls_log.append(tool_info)
 
-            tool_calls_log = []
+            def on_confirm_request(confirm_data):
+                """危险工具确认请求"""
+                nonlocal pending_confirmation
+                pending_confirmation = confirm_data
+                # 通过 SSE 发送确认请求给前端
+                yield f"data: {json.dumps({'confirm_required': confirm_data}, ensure_ascii=False)}\n\n"
 
-            for token in ai.stream_response(messages, on_chunk=on_chunk, on_tool_call=on_tool_call, stop_event=stop_event):
+            pending_confirmation = None
+
+            for token in ai.stream_response(
+                messages, 
+                on_chunk=on_chunk, 
+                on_tool_call=on_tool_call, 
+                stop_event=stop_event,
+                on_confirm_request=on_confirm_request,
+                conversation_id=cid
+            ):
                 if stop_event.is_set():
                     break
                 yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
@@ -413,19 +440,9 @@ def chat(cid):
                 final_content = full
             else:
                 final_content = full + disclaimer
-
-            # 保存消息（含工具调用记录）
-            msg = db.session.get(Message, msg_id)
-            msg.content = final_content
-            msg.token_count = ai.estimate_tokens(final_content)
-            msg.tool_calls = tool_calls_log if tool_calls_log else []
-            if stop_event.is_set():
-                msg.interrupted = True
-            db.session.commit()
-
-            conv = db.session.get(Conversation, cid)
-            conv.updated_at = db.func.now()
-            db.session.commit()
+            
+            # 更新 full 变量，供 finally 块保存使用
+            full = final_content
 
             # 写入缓存（仅在无工具调用时缓存）
             if cache_enabled and not tool_calls_log and not stop_event.is_set():
@@ -434,7 +451,9 @@ def chat(cid):
                 except Exception as e:
                     logger.warning(f"Cache write failed: {e}")
 
-            yield f"data: {json.dumps({'done': True, 'content': final_content, 'message_id': msg_id, 'token_count': msg.token_count}, ensure_ascii=False)}\n\n"
+            # 发送完成事件给前端
+            token_count = ai.estimate_tokens(final_content) if ai else 0
+            yield f"data: {json.dumps({'done': True, 'content': final_content, 'message_id': msg_id, 'token_count': token_count}, ensure_ascii=False)}\n\n"
 
             # 结果验证
             if current_app.config["VERIFY_ENABLED"] and not stop_event.is_set():
@@ -456,9 +475,38 @@ def chat(cid):
 
         except Exception as e:
             logger.error("聊天流异常: %s", e)
-            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+            # 发送错误事件给前端
+            try:
+                yield f"data: {json.dumps({'error': '回复异常，请重试'}, ensure_ascii=False)}\n\n"
+            except GeneratorExit:
+                pass
         finally:
             _interrupt_events.pop(cid, None)
+            # 统一保存消息：无论正常结束、异常、还是客户端断开，都保存已有内容
+            # 使用独立的事务确保保存成功
+            try:
+                db.session.rollback()  # 先回滚任何未完成的事务
+                msg = db.session.get(Message, msg_id)
+                if msg:
+                    if full.strip():
+                        # 有内容，保存
+                        msg.content = full
+                        msg.token_count = ai.estimate_tokens(full) if ai else 0
+                        msg.tool_calls = tool_calls_log if tool_calls_log else []
+                        if stop_event.is_set():
+                            msg.interrupted = True
+                        db.session.commit()
+                        # 更新对话时间
+                        conv = db.session.get(Conversation, cid)
+                        if conv:
+                            conv.updated_at = db.func.now()
+                            db.session.commit()
+                    else:
+                        # 完全没有内容，删除这条空消息，避免污染上下文
+                        db.session.delete(msg)
+                        db.session.commit()
+            except Exception as save_err:
+                logger.warning("保存消息失败: %s", save_err)
 
     return Response(
         stream_with_context(generate()),

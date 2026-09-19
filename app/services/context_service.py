@@ -84,12 +84,28 @@ class ContextService:
         return context
 
     def _build_system_context(self, conversation):
-        """构建系统上下文：摘要 + 长期记忆"""
+        """构建系统上下文：系统提示 + 摘要 + 长期记忆"""
         parts = []
         
+        # 1. 添加工具状态提示（动态告知 LLM 当前可用的功能）
+        from flask import current_app
+        knowledge_enabled = current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False)
+        code_index_enabled = current_app.config.get("CODE_INDEX_ENABLED", False)
+        
+        tool_status = []
+        if not knowledge_enabled:
+            tool_status.append("- 知识库查询功能已关闭，不要提及或使用 knowledge_search 工具")
+        if not code_index_enabled:
+            tool_status.append("- 代码库查询功能已关闭，不要提及或使用 search_code 工具")
+        
+        if tool_status:
+            parts.append(f"## 当前工具状态\n" + "\n".join(tool_status))
+        
+        # 2. 加入长期记忆
         if conversation.memory:
             parts.append(f"## 用户信息（长期记忆）\n{conversation.memory}")
         
+        # 3. 加入对话摘要
         if conversation.summary:
             parts.append(f"## 对话历史摘要\n{conversation.summary}")
         

@@ -175,6 +175,42 @@ def get_tools():
     return _build_tools_list()
 
 
+# 危险工具列表：这些工具执行前需要用户确认
+DANGEROUS_TOOLS = {
+    "execute_code": "执行Python代码",
+    "query_database": "查询数据库",
+    "delete_document": "删除知识库文档",
+}
+
+
+def is_dangerous_tool(name):
+    """检查工具是否属于危险操作"""
+    return name in DANGEROUS_TOOLS
+
+
+def get_dangerous_tool_description(name):
+    """获取危险工具的描述"""
+    return DANGEROUS_TOOLS.get(name, "未知操作")
+
+
+# 危险工具列表 - 需要用户确认
+DANGEROUS_TOOLS = {
+    "execute_code": "执行代码可能影响系统安全",
+    "query_database": "数据库查询可能访问敏感数据",
+    "web_search": "网络搜索可能获取不当内容",
+}
+
+
+def is_dangerous_tool(tool_name):
+    """检查工具是否属于危险操作"""
+    return tool_name in DANGEROUS_TOOLS
+
+
+def get_dangerous_tool_reason(tool_name):
+    """获取危险工具的确认原因"""
+    return DANGEROUS_TOOLS.get(tool_name, "该操作可能存在风险")
+
+
 def execute_tool(name, arguments):
     """执行工具调用"""
     args = json.loads(arguments) if isinstance(arguments, str) else arguments

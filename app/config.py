@@ -80,9 +80,6 @@ class Config:
     CODE_INDEX_DB_USER = os.getenv("CODE_INDEX_DB_USER", "postgres")
     CODE_INDEX_DB_PASSWORD = os.getenv("CODE_INDEX_DB_PASSWORD", "postgres")
     CODE_INDEX_DB_NAME = os.getenv("CODE_INDEX_DB_NAME", "postgres")
-    CODE_INDEX_EMBED_API_BASE =  os.getenv("EMBEDDING_BASE_URL", "http://localhost:11434/v1")
-    CODE_INDEX_EMBED_API_KEY = os.getenv("EMBEDDING_API_KEY", "ollama")
-    CODE_INDEX_EMBED_MODEL =  os.getenv("EMBEDDING_MODEL", "qwen3-embedding:8b")
     CODE_INDEX_DEFAULT_REPO = os.getenv("CODE_INDEX_DEFAULT_REPO", "flask_chat")
     CODE_INDEX_TOP_K = int(os.getenv("CODE_INDEX_TOP_K", "5"))
 

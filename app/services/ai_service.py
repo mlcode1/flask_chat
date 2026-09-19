@@ -3,12 +3,16 @@ AI 服务：流式响应、工具调用循环、Token 统计、多模态支持�
 """
 import json
 import logging
+import threading
 from openai import OpenAI
 from flask import current_app
 from langsmith import traceable
-from app.services.tool_service import get_tools, execute_tool
+from app.services.tool_service import get_tools, execute_tool, is_dangerous_tool, get_dangerous_tool_description
 
 logger = logging.getLogger(__name__)
+
+# 全局存储待确认的工具调用事件
+_pending_tool_confirmations = {}
 
 
 class AIService:
@@ -51,7 +55,7 @@ class AIService:
         raise last_exception
 
     @traceable(name="chat_stream_response", run_type="llm")
-    def stream_response(self, messages, on_chunk=None, on_tool_call=None, stop_event=None):
+    def stream_response(self, messages, on_chunk=None, on_tool_call=None, stop_event=None, on_confirm_request=None, conversation_id=None):
         full_content = ""
         tool_calls_accumulator = {}
 
@@ -136,7 +140,49 @@ class AIService:
             ]
 
             for tc in tool_calls_list:
-                result = execute_tool(tc["function"]["name"], tc["function"]["arguments"])
+                tool_name = tc["function"]["name"]
+                tool_args = tc["function"]["arguments"]
+                
+                # 检查是否为危险工具
+                if is_dangerous_tool(tool_name) and on_confirm_request and conversation_id:
+                    # 发送确认请求给前端
+                    confirm_id = f"{conversation_id}_{tc['id']}"
+                    confirm_event = threading.Event()
+                    _pending_tool_confirmations[confirm_id] = {
+                        "event": confirm_event,
+                        "approved": False,
+                        "tool_name": tool_name,
+                        "tool_args": tool_args
+                    }
+                    
+                    # 通知前端需要确认
+                    on_confirm_request({
+                        "confirm_id": confirm_id,
+                        "tool_name": tool_name,
+                        "description": get_dangerous_tool_description(tool_name),
+                        "arguments": tool_args
+                    })
+                    
+                    # 等待用户确认（最多60秒）
+                    confirmed = confirm_event.wait(timeout=60)
+                    
+                    # 清理待确认记录
+                    confirm_data = _pending_tool_confirmations.pop(confirm_id, None)
+                    
+                    if not confirmed or not (confirm_data and confirm_data.get("approved")):
+                        # 用户拒绝或超时
+                        result = json.dumps({"error": "用户拒绝执行此操作"})
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result,
+                        })
+                        if on_tool_call:
+                            on_tool_call(tc, result)
+                        continue
+                
+                # 执行工具
+                result = execute_tool(tool_name, tool_args)
                 if on_tool_call:
                     on_tool_call(tc, result)
                 messages.append({

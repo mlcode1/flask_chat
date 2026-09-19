@@ -23,24 +23,28 @@ def get_code_index_db_connection():
 
 
 def get_embedding_client():
-    """获取 embedding 客户端（使用与 code_index 相同的模型）"""
+    """获取 embedding 客户端（统一使用 EMBEDDING_* 配置）"""
     return OpenAI(
-        api_key=current_app.config.get("CODE_INDEX_EMBED_API_KEY", "ollama"),
-        base_url=current_app.config["CODE_INDEX_EMBED_API_BASE"],
+        api_key=current_app.config.get("EMBEDDING_API_KEY", "ollama"),
+        base_url=current_app.config["EMBEDDING_BASE_URL"],
     )
 
 
 def get_query_embedding(text: str) -> list[float]:
     """将查询文本转换为向量"""
     client = get_embedding_client()
-    model = current_app.config["CODE_INDEX_EMBED_MODEL"]
+    model = current_app.config["EMBEDDING_MODEL"]
     response = client.embeddings.create(model=model, input=[text])
     return response.data[0].embedding
 
 
 def search_code(query: str, repo_name: str = None, top_k: int = None) -> list[dict]:
     """
-    在代码库向量索引中搜索相关代码片段
+    在代码库两层索引中搜索相关代码片段
+    
+    搜索流程：
+    1. 第一层：在文件摘要中找到最相关的3-5个文件
+    2. 第二层：在这些文件的代码块中精确搜索
     
     Args:
         query: 查询文本
@@ -80,7 +84,8 @@ def search_code(query: str, repo_name: str = None, top_k: int = None) -> list[di
             repo_name = indexed_repos[0]
             logger.info(f"未指定仓库名，自动选择: {repo_name}")
     
-    table_name = f"data_code_embeddings_{repo_name}"
+    summaries_table = f"data_code_summaries_{repo_name}"
+    chunks_table = f"data_code_chunks_{repo_name}"
     
     try:
         # 1. 生成查询向量
@@ -90,26 +95,70 @@ def search_code(query: str, repo_name: str = None, top_k: int = None) -> list[di
         conn = get_code_index_db_connection()
         cursor = conn.cursor()
         
-        # 使用余弦相似度搜索
-        sql = f"""
+        # ========== 第一层：在文件摘要中查找最相关的文件 ==========
+        # 先找到最相关的 top_k*2 个文件（多取一些用于第二层过滤）
+        summary_sql = f"""
             SELECT 
                 text,
                 metadata_,
                 1 - (embedding <=> %s::vector) as similarity
-            FROM {table_name}
+            FROM {summaries_table}
             ORDER BY embedding <=> %s::vector
             LIMIT %s
         """
         
-        cursor.execute(sql, (query_embedding, query_embedding, top_k))
-        results = cursor.fetchall()
+        cursor.execute(summary_sql, (query_embedding, query_embedding, top_k * 2))
+        summary_results = cursor.fetchall()
+        
+        if not summary_results:
+            cursor.close()
+            conn.close()
+            return []
+        
+        # 提取相关文件路径
+        relevant_files = []
+        for _, metadata_json, _ in summary_results:
+            try:
+                metadata = json.loads(metadata_json) if metadata_json else {}
+                file_path = metadata.get('file_path', '')
+                if file_path and file_path not in relevant_files:
+                    relevant_files.append(file_path)
+            except:
+                pass
+        
+        if not relevant_files:
+            cursor.close()
+            conn.close()
+            return []
+        
+        logger.info(f"第一层搜索找到 {len(relevant_files)} 个相关文件")
+        
+        # ========== 第二层：在相关文件的代码块中精确搜索 ==========
+        # 构建 IN 子句（使用参数化查询防止 SQL 注入）
+        placeholders = ','.join(['%s'] * len(relevant_files))
+        
+        chunk_sql = f"""
+            SELECT 
+                text,
+                metadata_,
+                1 - (embedding <=> %s::vector) as similarity
+            FROM {chunks_table}
+            WHERE metadata_->>'file_path' IN ({placeholders})
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """
+        
+        # 参数：query_embedding, file_paths..., query_embedding, top_k
+        chunk_params = [query_embedding] + relevant_files + [query_embedding, top_k]
+        cursor.execute(chunk_sql, chunk_params)
+        chunk_results = cursor.fetchall()
         
         cursor.close()
         conn.close()
         
         # 3. 格式化结果
         formatted_results = []
-        for text, metadata_json, similarity in results:
+        for text, metadata_json, similarity in chunk_results:
             try:
                 metadata = json.loads(metadata_json) if metadata_json else {}
             except:
@@ -124,6 +173,7 @@ def search_code(query: str, repo_name: str = None, top_k: int = None) -> list[di
                 "score": float(similarity) if similarity else 0.0,
             })
         
+        logger.info(f"两层搜索完成，返回 {len(formatted_results)} 个代码块")
         return formatted_results
         
     except psycopg2.Error as e:
@@ -145,17 +195,17 @@ def list_indexed_repos() -> list[str]:
         conn = get_code_index_db_connection()
         cursor = conn.cursor()
         
-        # 查询所有 data_code_embeddings_* 表（llama_index PGVectorStore 固定加 data_ 前缀）
+        # 查询所有 data_code_summaries_* 表（第一层索引表，PGVectorStore 固定加 data_ 前缀）
         cursor.execute("""
             SELECT table_name 
             FROM information_schema.tables 
             WHERE table_schema = 'public' 
-            AND table_name LIKE 'data_code_embeddings_%'
+            AND table_name LIKE 'data_code_summaries_%'
         """)
         
         tables = cursor.fetchall()
         
-        repos = [table[0].replace("data_code_embeddings_", "") for table in tables]
+        repos = [table[0].replace("data_code_summaries_", "") for table in tables]
         return sorted(repos)
         
     except Exception as e:
@@ -180,33 +230,48 @@ def get_repo_stats(repo_name: str) -> dict:
     if not current_app.config.get("CODE_INDEX_ENABLED", False):
         return {"enabled": False}
     
-    table_name = f"data_code_embeddings_{repo_name}"
+    summaries_table = f"data_code_summaries_{repo_name}"
+    chunks_table = f"data_code_chunks_{repo_name}"
     
     try:
         conn = get_code_index_db_connection()
         cursor = conn.cursor()
         
-        # 检查表是否存在
+        # 检查第一层表是否存在
         cursor.execute("""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
                 WHERE table_schema = 'public' 
                 AND table_name = %s
             )
-        """, (table_name,))
+        """, (summaries_table,))
         
-        exists = cursor.fetchone()[0]
+        summaries_exists = cursor.fetchone()[0]
         
-        if not exists:
+        # 检查第二层表是否存在
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = %s
+            )
+        """, (chunks_table,))
+        
+        chunks_exists = cursor.fetchone()[0]
+        
+        if not (summaries_exists and chunks_exists):
             cursor.close()
             conn.close()
             return {"enabled": True, "indexed": False}
         
         # 查询统计信息
-        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+        cursor.execute(f"SELECT COUNT(*) FROM {summaries_table}")
+        summary_count = cursor.fetchone()[0]
+        
+        cursor.execute(f"SELECT COUNT(*) FROM {chunks_table}")
         chunk_count = cursor.fetchone()[0]
         
-        cursor.execute(f"SELECT COUNT(DISTINCT metadata_->>'file_path') FROM {table_name}")
+        cursor.execute(f"SELECT COUNT(DISTINCT metadata_->>'file_path') FROM {chunks_table}")
         file_count = cursor.fetchone()[0]
         
         cursor.close()
@@ -216,6 +281,7 @@ def get_repo_stats(repo_name: str) -> dict:
             "enabled": True,
             "indexed": True,
             "repo_name": repo_name,
+            "summary_count": summary_count,
             "chunk_count": chunk_count,
             "file_count": file_count,
         }
