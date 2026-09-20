@@ -191,6 +191,7 @@ def get_messages(cid):
         "image_urls": m.image_urls or [],
         "token_count": m.token_count or 0,
         "tool_calls": m.tool_calls or [],
+        "status": m.status or "completed",
         "created_at": m.created_at.isoformat(),
     } for m in messages])
 

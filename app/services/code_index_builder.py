@@ -208,72 +208,314 @@ def delete_indexed_files(repo_id: int, repo_name: str, file_paths: List[str]):
     logger.info(f"已删除 {len(file_paths)} 个文件的索引记录")
 
 
+# 代码文件扩展名（使用结构化提取，零 token）
+_CODE_EXTS = {'.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs', '.c', '.cpp', '.h', '.hpp', '.cs', '.rb', '.php', '.swift', '.kt'}
+# 非代码文件扩展名（使用 LLM 生成摘要）
+_DOC_EXTS = {'.md', '.rst', '.txt', '.yml', '.yaml', '.toml', '.ini', '.cfg', '.conf', '.sh', '.bash', '.zsh', '.sql', '.html', '.css', '.scss'}
+
+
+def _extract_python_metadata(content: str) -> str:
+    """从 Python 文件中提取结构化元数据：imports、模块 docstring、类/函数签名"""
+    parts = []
+
+    # 1. 提取 import 语句（技术栈信息）
+    imports = re.findall(r'^(?:from\s+[\w.]+\s+)?import\s+.+', content, re.MULTILINE)
+    if imports:
+        # 去重并限制数量
+        seen = set()
+        clean_imports = []
+        for imp in imports:
+            imp = imp.strip()
+            if imp not in seen and len(seen) < 15:
+                seen.add(imp)
+                clean_imports.append(imp)
+        if clean_imports:
+            parts.append(f"依赖: {', '.join(clean_imports[:10])}")
+
+    # 2. 提取模块级 docstring
+    doc_match = re.match(r'^(?:""\"(.*?)\"""|\'\'\'(.*?)\'\'\')', content, re.DOTALL)
+    if doc_match:
+        docstring = (doc_match.group(1) or doc_match.group(2) or '').strip()
+        if docstring:
+            parts.append(f"模块说明: {docstring[:300]}")
+
+    # 3. 提取类定义（包括顶层和有缩进的）
+    classes = re.findall(r'^\s*class\s+(\w+)(?:\(([^)]*)\))?', content, re.MULTILINE)
+    if classes:
+        class_info = []
+        for name, bases in classes[:15]:
+            base_str = f"({bases})" if bases.strip() else ""
+            class_info.append(f"{name}{base_str}")
+        parts.append(f"类: {', '.join(class_info)}")
+
+    # 4. 提取函数/方法签名（包括类方法，匹配有缩进的 def）
+    func_pattern = r'^\s*def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*(\S+))?'
+    funcs = re.findall(func_pattern, content, re.MULTILINE)
+    if funcs:
+        sigs = []
+        for name, params, ret_type in funcs[:20]:
+            # 清理参数：只保留参数名和类型注解，去掉 self/cls
+            params_clean = params.strip()
+            if params_clean.startswith('self'):
+                params_clean = params_clean[4:].lstrip(',').strip()
+            elif params_clean.startswith('cls'):
+                params_clean = params_clean[3:].lstrip(',').strip()
+            # 如果参数太长，截断
+            if len(params_clean) > 80:
+                params_clean = params_clean[:80] + '...'
+            sig = f"{name}({params_clean})"
+            if ret_type:
+                sig += f" -> {ret_type}"
+            sigs.append(sig)
+        parts.append(f"方法: {'; '.join(sigs)}")
+
+    # 5. 提取类级 docstring（第一个类的方法）
+    class_docs = re.findall(r'class\s+\w+[^:]*:\s*(?:"""(.*?)"""|\'\'\'(.*?)\'\'\')', content, re.DOTALL)
+    for cd in class_docs[:3]:
+        doc = (cd[0] or cd[1] or '').strip()
+        if doc:
+            parts.append(f"类说明: {doc[:200]}")
+
+    # 6. 提取常量/配置定义（大写变量）
+    constants = re.findall(r'^([A-Z_][A-Z_0-9]+)\s*=\s*(.+?)(?:\s*#.*)?$', content, re.MULTILINE)
+    if constants:
+        const_names = [name for name, _ in constants[:10]]
+        parts.append(f"常量: {', '.join(const_names)}")
+
+    return '\n'.join(parts)
+
+
+def _extract_js_ts_metadata(content: str) -> str:
+    """从 JS/TS 文件中提取结构化元数据"""
+    parts = []
+
+    # 1. 提取 import/require 语句
+    imports = re.findall(r'^(?:import\s+.+|const\s+\{?\s*\w+.*\}?\s*=\s*require\s*\(.+\))', content, re.MULTILINE)
+    if imports:
+        seen = set()
+        clean = []
+        for imp in imports:
+            imp = imp.strip()[:100]
+            if imp not in seen and len(seen) < 15:
+                seen.add(imp)
+                clean.append(imp)
+        if clean:
+            parts.append(f"依赖: {', '.join(clean[:10])}")
+
+    # 2. 提取文件头注释
+    head_comment = re.match(r'^(?:/\*\*(.*?)\*/|//\s*(.+))', content, re.DOTALL)
+    if head_comment:
+        comment = (head_comment.group(1) or head_comment.group(2) or '').strip()
+        # 清理 JSDoc 的 * 前缀
+        comment = re.sub(r'^\s*\*\s?', '', comment, flags=re.MULTILINE).strip()
+        if comment:
+            parts.append(f"模块说明: {comment[:300]}")
+
+    # 3. 提取类定义
+    classes = re.findall(r'(?:export\s+)?(?:default\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?', content)
+    if classes:
+        class_info = [f"{name}" + (f" extends {base}" if base else "") for name, base in classes[:10]]
+        parts.append(f"类: {', '.join(class_info)}")
+
+    # 4. 提取函数定义（多种语法形式）
+    funcs = []
+    # function name()
+    funcs += re.findall(r'(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)', content)
+    # const name = () => 或 const name = function()
+    funcs += re.findall(r'(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|\w+)\s*=>', content)
+    # method() {} 形式
+    funcs += re.findall(r'(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{', content)
+
+    if funcs:
+        seen = set()
+        sigs = []
+        for item in funcs[:20]:
+            name = item[0] if isinstance(item, tuple) else item
+            if name not in seen and not name.startswith('_'):
+                seen.add(name)
+                sigs.append(name)
+        if sigs:
+            parts.append(f"方法: {', '.join(sigs[:15])}")
+
+    # 5. 提取 interface/type 定义（TS）
+    interfaces = re.findall(r'(?:export\s+)?(?:interface|type)\s+(\w+)', content)
+    if interfaces:
+        parts.append(f"类型: {', '.join(interfaces[:10])}")
+
+    return '\n'.join(parts)
+
+
+def _extract_java_metadata(content: str) -> str:
+    """从 Java 文件中提取结构化元数据"""
+    parts = []
+
+    # 1. package 和 import
+    pkg = re.search(r'^package\s+([\w.]+)', content, re.MULTILINE)
+    if pkg:
+        parts.append(f"包: {pkg.group(1)}")
+
+    imports = re.findall(r'^import\s+([\w.]+(?:\.\*)?)', content, re.MULTILINE)
+    if imports:
+        parts.append(f"依赖: {', '.join(imports[:10])}")
+
+    # 2. 类定义
+    classes = re.findall(r'(?:public|private|protected)?\s*(?:abstract\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([\w,\s]+))?', content)
+    if classes:
+        for name, ext, impl in classes[:5]:
+            info = name
+            if ext:
+                info += f" extends {ext}"
+            if impl:
+                info += f" implements {impl.strip()}"
+            parts.append(f"类: {info}")
+
+    # 3. 方法签名
+    methods = re.findall(r'(?:public|private|protected)\s+(?:static\s+)?(\w+(?:<[^>]+>)?)\s+(\w+)\s*\(([^)]*)\)', content)
+    if methods:
+        sigs = [f"{ret} {name}({params.strip()[:60]})" for ret, name, params in methods[:15]]
+        parts.append(f"方法: {'; '.join(sigs)}")
+
+    return '\n'.join(parts)
+
+
+def _extract_go_metadata(content: str) -> str:
+    """从 Go 文件中提取结构化元数据"""
+    parts = []
+
+    # package
+    pkg = re.search(r'^package\s+(\w+)', content, re.MULTILINE)
+    if pkg:
+        parts.append(f"包: {pkg.group(1)}")
+
+    # imports
+    imports = re.findall(r'"([^"]+)"', content[:1000])  # 只扫描前 1000 字符
+    if imports:
+        parts.append(f"依赖: {', '.join(imports[:10])}")
+
+    # 函数
+    funcs = re.findall(r'func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(([^)]*)\)', content)
+    if funcs:
+        sigs = [f"{name}({params.strip()[:60]})" for name, params in funcs[:15]]
+        parts.append(f"方法: {', '.join(sigs)}")
+
+    # struct/interface
+    types = re.findall(r'type\s+(\w+)\s+(?:struct|interface)', content)
+    if types:
+        parts.append(f"类型: {', '.join(types[:10])}")
+
+    return '\n'.join(parts)
+
+
+def _extract_generic_metadata(content: str, ext: str) -> str:
+    """通用的非代码文件元数据提取（YAML/TOML/SQL/Shell 等）"""
+    parts = []
+
+    # 提取文件头注释（# 开头）
+    comments = re.findall(r'^#\s*(.+)', content, re.MULTILINE)
+    if comments:
+        header = ' '.join(comments[:5])
+        parts.append(f"说明: {header[:300]}")
+
+    # YAML/TOML：提取顶级 key
+    if ext in ('.yml', '.yaml', '.toml', '.ini', '.cfg', '.conf'):
+        keys = re.findall(r'^(\w[\w.-]*)\s*[:=]', content, re.MULTILINE)
+        if keys:
+            parts.append(f"配置项: {', '.join(keys[:15])}")
+
+    # SQL：提取表名和操作
+    if ext == '.sql':
+        tables = re.findall(r'(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+(\w+)', content, re.IGNORECASE)
+        if tables:
+            parts.append(f"涉及表: {', '.join(set(tables)[:10])}")
+
+    # Shell：提取命令
+    if ext in ('.sh', '.bash', '.zsh'):
+        cmds = re.findall(r'^(\w+(?:\s+-\w+)*)', content, re.MULTILINE)
+        if cmds:
+            parts.append(f"主要命令: {', '.join(cmds[:10])}")
+
+    return '\n'.join(parts)
+
+
+def _is_code_file(ext: str) -> bool:
+    """判断是否为代码文件"""
+    return ext in _CODE_EXTS
+
+
 def generate_file_summary(file_path: str, content: str, client: OpenAI, model: str) -> str:
     """
     为文件生成摘要，用于第一层索引
     
-    提取文件的关键信息：
-    - 文件类型（Python/JavaScript等）
-    - 主要类和函数
-    - 核心功能描述
+    混合策略（方案3）：
+    - 代码文件：提取结构化元数据（imports/docstring/签名），零 token 消耗
+    - 非代码文件：用 LLM 生成语义摘要
+    - 降级：结构化提取结果太短时，降级到 LLM
     """
-    # 提取文件扩展名
     ext = Path(file_path).suffix.lower()
-    
-    # 根据文件类型提取关键信息
-    if ext == '.py':
-        # Python: 提取类名和函数名
-        classes = re.findall(r'^class\s+(\w+)', content, re.MULTILINE)
-        functions = re.findall(r'^def\s+(\w+)', content, re.MULTILINE)
-        key_elements = classes + functions[:10]  # 最多取10个函数
-    elif ext in ['.js', '.ts', '.tsx', '.jsx']:
-        # JavaScript/TypeScript: 提取函数和类
-        functions = re.findall(r'function\s+(\w+)', content)
-        classes = re.findall(r'class\s+(\w+)', content)
-        key_elements = classes + functions[:10]
+    file_name = Path(file_path).name
+    summary_text = ''
+
+    if _is_code_file(ext):
+        # ===== 代码文件：结构化提取（零 token） =====
+        if ext == '.py':
+            summary_text = _extract_python_metadata(content)
+        elif ext in ('.js', '.ts', '.tsx', '.jsx'):
+            summary_text = _extract_js_ts_metadata(content)
+        elif ext == '.java':
+            summary_text = _extract_java_metadata(content)
+        elif ext == '.go':
+            summary_text = _extract_go_metadata(content)
+        else:
+            summary_text = _extract_generic_metadata(content, ext)
+
+        # 添加文件路径前缀
+        if summary_text:
+            summary_text = f"文件: {file_path}\n{summary_text}"
+
+        # 如果提取结果太短（< 50 字符），说明文件结构不清晰，降级到 LLM
+        if len(summary_text.strip()) < 50:
+            logger.info(f"代码文件 {file_path} 结构化提取结果太短，降级到 LLM")
+            summary_text = ''  # 清空，走下面的 LLM 降级
     else:
-        # 其他文件类型：取前200字符
-        key_elements = []
-    
-    # 构建摘要提示
-    if key_elements:
-        prompt = f"""为以下代码文件生成简短摘要（不超过100字）：
+        # ===== 非代码文件：直接用 LLM =====
+        pass
+
+    # 如果结构化提取已完成，直接返回（零 token）
+    if summary_text:
+        logger.debug(f"结构化摘要（零 token）: {file_path}")
+        return summary_text
+
+    # ===== LLM 降级：非代码文件 或 结构化提取失败 =====
+    content_preview = content[:800]
+    prompt = f"""为以下文件生成简短摘要（不超过100字）：
 文件路径: {file_path}
-包含的元素: {', '.join(key_elements[:15])}
+内容预览:
+{content_preview}
 
 请用一句话描述这个文件的主要功能和用途。"""
-    else:
-        # 对于没有明显结构的文件，使用内容前缀
-        content_preview = content[:500]
-        prompt = f"""为以下文件生成简短摘要（不超过100字）：
-文件路径: {file_path}
-内容预览: {content_preview}
 
-请用一句话描述这个文件的主要功能和用途。"""
-    
     try:
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000,  # reasoning 模型需要更多 tokens（推理 + 输出）
+            max_tokens=1000,
         )
-        content = response.choices[0].message.content
-        if not content:
+        result = response.choices[0].message.content
+        if not result:
             raise ValueError("LLM 返回空内容")
-        
-        summary = content.strip()
-        # 清理摘要，移除多余空白
+
+        summary = result.strip()
         summary = re.sub(r'\s+', ' ', summary)
-        
-        # 如果清理后还是空，走降级逻辑
+
         if not summary:
             raise ValueError("LLM 返回空白内容")
-        
-        return summary
+
+        logger.debug(f"LLM 摘要: {file_path}")
+        return f"文件: {file_path}\n{summary}"
     except Exception as e:
-        logger.warning(f"生成文件摘要失败 {file_path}: {e}")
-        # 降级：使用文件名和扩展名
-        return f"{Path(file_path).name} - {ext}文件"
+        logger.warning(f"LLM 摘要生成失败 {file_path}: {e}")
+        # 最终降级：使用文件名 + 内容前 200 字符
+        return f"文件: {file_path}\n{file_name} - {ext}文件\n{content[:200]}"
 
 
 def build_index(repo_id: int, repo_name: str, repo_path: str, reindex: bool = True, mode: str = 'full', progress_callback=None):

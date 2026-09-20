@@ -54,6 +54,7 @@ class Message(db.Model):
     token_count = db.Column(db.Integer, default=0)       # Token 计数统计
     compressed = db.Column(db.Boolean, default=False)    # 是否已压缩到摘要中
     feedback = db.Column(db.String(20), nullable=True)   # like/dislike/null
+    status = db.Column(db.String(20), default='completed')  # generating/completed/stopped/error
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 

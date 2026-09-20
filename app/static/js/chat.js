@@ -22,8 +22,176 @@
 
     let currentConvId = null;
     let isStreaming = false;
-    let currentAbortController = null;
     let verifyEnabled = false;
+    
+    // ========== Socket.IO 连接 ==========
+    let socket = null;
+    let currentMessageId = null;  // 当前正在生成的消息ID
+    let currentBubble = null;     // 当前正在显示的气泡
+    let fullContent = "";         // 累积的完整内容
+    let toolCalls = [];           // 工具调用记录
+    
+    // 初始化 Socket.IO 连接
+    function initSocket() {
+        if (socket) return;  // 已连接
+        
+        socket = io({
+            transports: ['websocket'],
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionAttempts: 5
+        });
+        
+        // 连接成功
+        socket.on('connect', () => {
+            console.log('WebSocket 已连接');
+            // 如果有当前对话，加入对应的房间
+            if (currentConvId) {
+                socket.emit('join', { conversation_id: currentConvId });
+            }
+        });
+        
+        // 连接断开
+        socket.on('disconnect', () => {
+            console.log('WebSocket 已断开');
+        });
+        
+        // 接收 token
+        socket.on('token', (data) => {
+            if (!currentBubble || currentMessageId !== data.message_id) return;
+            
+            fullContent += data.token;
+            const cursor = currentBubble.querySelector(".typing-cursor");
+            if (cursor) cursor.remove();
+            currentBubble.innerHTML = formatContent(fullContent);
+            currentBubble.appendChild(createCursor());
+            scrollToBottom();
+        });
+        
+        // 接收工具调用
+        socket.on('tool_calls', (data) => {
+            if (!currentBubble || currentMessageId !== data.message_id) return;
+            
+            toolCalls = toolCalls.concat(data.tool_calls);
+            renderToolCalls(currentBubble, toolCalls);
+            scrollToBottom();
+        });
+        
+        // 生成完成
+        socket.on('generation_completed', (data) => {
+            if (!currentBubble || currentMessageId !== data.message_id) return;
+            
+            const cursor = currentBubble.querySelector(".typing-cursor");
+            if (cursor) cursor.remove();
+            
+            fullContent = data.content;
+            currentBubble.innerHTML = formatContent(fullContent);
+            
+            // 重置状态
+            isStreaming = false;
+            sendBtn.disabled = false;
+            interruptBtn.style.display = "none";
+            currentMessageId = null;
+            currentBubble = null;
+            fullContent = "";
+            toolCalls = [];
+        });
+        
+        // 生成被停止
+        socket.on('generation_stopped', (data) => {
+            if (!currentBubble || currentMessageId !== data.message_id) return;
+            
+            const cursor = currentBubble.querySelector(".typing-cursor");
+            if (cursor) cursor.remove();
+            
+            // 显示已停止标记
+            const tag = document.createElement("span");
+            tag.className = "interrupted-tag";
+            tag.textContent = "已打断";
+            currentBubble.appendChild(tag);
+            
+            // 重置状态
+            isStreaming = false;
+            sendBtn.disabled = false;
+            interruptBtn.style.display = "none";
+            currentMessageId = null;
+            currentBubble = null;
+            fullContent = "";
+            toolCalls = [];
+        });
+        
+        // 验证开始
+        socket.on('verifying', (data) => {
+            if (!currentBubble || currentMessageId !== data.message_id) return;
+            
+            const indicator = document.createElement("div");
+            indicator.className = "verifying-indicator";
+            indicator.id = "current-verifying";
+            indicator.innerHTML = `<span class="dot-loader"></span><span>正在进行结果验证...</span>`;
+            currentBubble.appendChild(indicator);
+            scrollToBottom();
+        });
+        
+        // 验证完成
+        socket.on('verified', (data) => {
+            if (!currentBubble || currentMessageId !== data.message_id) return;
+            
+            const indicator = document.getElementById("current-verifying");
+            if (indicator) indicator.remove();
+            
+            renderVerification(currentBubble, data.verification);
+            scrollToBottom();
+        });
+        
+        // 错误
+        socket.on('generation_error', (data) => {
+            if (!currentBubble || currentMessageId !== data.message_id) return;
+            
+            currentBubble.innerHTML = `
+                <div class="error-state">
+                    <span style="color:var(--danger)">回复失败，请重试</span>
+                    <button class="retry-btn">重试</button>
+                </div>`;
+            currentBubble.querySelector(".retry-btn").onclick = () => {
+                currentBubble.parentElement.remove();
+                messageInput.value = data.user_content;
+                sendMessage();
+            };
+            
+            // 重置状态
+            isStreaming = false;
+            sendBtn.disabled = false;
+            interruptBtn.style.display = "none";
+            currentMessageId = null;
+            currentBubble = null;
+            fullContent = "";
+            toolCalls = [];
+        });
+        
+        // 恢复中断的生成（断点续传）
+        socket.on('generation_resume', (data) => {
+            // 如果当前没有正在进行的生成，但有消息ID，说明是恢复
+            if (!isStreaming && data.message_id) {
+                currentMessageId = data.message_id;
+                fullContent = data.content || "";
+                currentBubble = createStreamingBubble();
+                
+                if (fullContent) {
+                    currentBubble.innerHTML = formatContent(fullContent);
+                    currentBubble.appendChild(createCursor());
+                }
+                
+                isStreaming = true;
+                sendBtn.disabled = true;
+                interruptBtn.style.display = "inline-block";
+            }
+        });
+    }
+    
+    // 初始化连接（仅在聊天页面）
+    if (isChatPage) {
+        initSocket();
+    }
 
     // ========== 通用函数 ==========
     function scrollToBottom() {
@@ -500,6 +668,13 @@
     }
 
     async function loadMessages(convId) {
+        // 如果之前有加入房间，先离开
+        if (socket && currentConvId && currentConvId !== convId) {
+            socket.emit('leave', { conversation_id: currentConvId });
+        }
+        
+        currentConvId = convId;
+        
         try {
             const res = await fetch(`/api/conversations/${convId}/messages`);
             const messages = await res.json();
@@ -510,9 +685,14 @@
                         <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
                         <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
                     </div>`;
-                return;
+            } else {
+                messages.forEach(m => addMessage(m.role, m.content, m.interrupted, m.verification, m.id, m.tool_calls));
             }
-            messages.forEach(m => addMessage(m.role, m.content, m.interrupted, m.verification, m.id, m.tool_calls));
+            
+            // 加入新房间
+            if (socket) {
+                socket.emit('join', { conversation_id: convId });
+            }
         } catch (e) {
             console.error("加载消息失败:", e);
         }
@@ -541,124 +721,22 @@
         interruptBtn.style.display = "inline-block";
 
         const bubble = createStreamingBubble();
-        let fullContent = "";
-        let currentMessageId = null;
-        let verificationStatus = null; // "verified" | "failed" | "skipped" | null
+        currentBubble = bubble;
+        fullContent = "";
+        toolCalls = [];
 
-        currentAbortController = new AbortController();
-
-        try {
-            const res = await fetch(`/api/conversations/${currentConvId}/chat`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ content, model: modelSelector.value }),
-                signal: currentAbortController.signal,
-            });
-
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = "";
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split("\n");
-                buffer = lines.pop();
-
-                for (const line of lines) {
-                    if (!line.startsWith("data: ")) continue;
-                    try {
-                        const data = JSON.parse(line.slice(6));
-
-                        if (data.token) {
-                            fullContent += data.token;
-                            const cursor = bubble.querySelector(".typing-cursor");
-                            if (cursor) cursor.remove();
-                            bubble.innerHTML = formatContent(fullContent);
-                            bubble.appendChild(createCursor());
-                            scrollToBottom();
-                        }
-
-                        if (data.tool_calls) {
-                            // 显示工具调用信息
-                            renderToolCalls(bubble, data.tool_calls);
-                            scrollToBottom();
-                        }
-
-                        if (data.done) {
-                            const cursor = bubble.querySelector(".typing-cursor");
-                            if (cursor) cursor.remove();
-                            bubble.innerHTML = formatContent(data.content);
-                            // 保存消息ID用于后续验证
-                            currentMessageId = data.message_id;
-                        }
-
-                        if (data.verifying) {
-                            // 显示验证中指示器
-                            const indicator = document.createElement("div");
-                            indicator.className = "verifying-indicator";
-                            indicator.id = "current-verifying";
-                            indicator.innerHTML = `<span class="dot-loader"></span><span>正在进行结果验证...</span>`;
-                            bubble.appendChild(indicator);
-                            scrollToBottom();
-                        }
-
-                        if (data.verified) {
-                            // 验证完成，移除指示器并显示结果
-                            const indicator = document.getElementById("current-verifying");
-                            if (indicator) indicator.remove();
-                            verificationStatus = data.verified.status || "skipped";
-                            renderVerification(bubble, data.verified);
-                            scrollToBottom();
-                        }
-
-                        if (data.error) {
-                            bubble.innerHTML = `
-                                <div class="error-state">
-                                    <span style="color:var(--danger)">回复失败，请重试</span>
-                                    <button class="retry-btn">重试</button>
-                                </div>`;
-                            bubble.querySelector(".retry-btn").onclick = () => {
-                                bubble.parentElement.remove();
-                                messageInput.value = content;
-                                sendMessage();
-                            };
-                        }
-                    } catch (e) {
-                        // skip malformed lines
-                    }
-                }
-            }
-        } catch (e) {
-            if (e.name !== "AbortError") {
-                bubble.innerHTML = `
-                    <div class="error-state">
-                        <span style="color:var(--danger)">请求失败，请重试</span>
-                        <button class="retry-btn">重试</button>
-                    </div>`;
-                bubble.querySelector(".retry-btn").onclick = () => {
-                    bubble.parentElement.remove();
-                    messageInput.value = content;
-                    sendMessage();
-                };
-            }
-        } finally {
-            isStreaming = false;
-            sendBtn.disabled = false;
-            interruptBtn.style.display = "none";
-            currentAbortController = null;
-
-            // 验证开关打开 + 没有验证结果（verified/failed/skipped 都算）→ 显示手动验证按钮
-            if (verifyEnabled && currentMessageId && !verificationStatus && !bubble.querySelector(".verifying-indicator")) {
-                const verifyBtn = document.createElement("button");
-                verifyBtn.className = "verify-btn";
-                verifyBtn.textContent = "🔍 结果验证";
-                verifyBtn.onclick = () => manualVerify(currentMessageId, bubble);
-                bubble.appendChild(verifyBtn);
-            }
-        }
+        // 通过 WebSocket 发送消息
+        socket.emit('chat_message', {
+            conversation_id: currentConvId,
+            content: content,
+            model: modelSelector.value,
+            image_urls: []
+        });
+        
+        // 等待服务器返回 message_created 事件
+        socket.once('message_created', (data) => {
+            currentMessageId = data.message_id;
+        });
     }
 
     function createCursor() {
@@ -668,14 +746,12 @@
     }
 
     async function interrupt() {
-        if (!currentConvId || !isStreaming) return;
+        if (!currentConvId || !isStreaming || !currentMessageId) return;
         try {
-            await fetch(`/api/conversations/${currentConvId}/interrupt`, { method: "POST" });
+            // 通过 WebSocket 发送中断请求
+            socket.emit('stop_generation', { message_id: currentMessageId });
         } catch (e) {
             console.error("打断失败:", e);
-        }
-        if (currentAbortController) {
-            currentAbortController.abort();
         }
     }
 
