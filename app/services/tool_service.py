@@ -129,7 +129,7 @@ def _build_tools_list():
             }
         })
 
-    # 数据库查询（始终可用，但内部做了安全检查）
+    # 数据库查询（始终可用，但内部做了安全检查和表级访问控制）
     tools.append({
         "type": "function",
         "function": {
@@ -176,24 +176,6 @@ def get_tools():
 
 
 # 危险工具列表：这些工具执行前需要用户确认
-DANGEROUS_TOOLS = {
-    "execute_code": "执行Python代码",
-    "query_database": "查询数据库",
-    "delete_document": "删除知识库文档",
-}
-
-
-def is_dangerous_tool(name):
-    """检查工具是否属于危险操作"""
-    return name in DANGEROUS_TOOLS
-
-
-def get_dangerous_tool_description(name):
-    """获取危险工具的描述"""
-    return DANGEROUS_TOOLS.get(name, "未知操作")
-
-
-# 危险工具列表 - 需要用户确认
 DANGEROUS_TOOLS = {
     "execute_code": "执行代码可能影响系统安全",
     "query_database": "数据库查询可能访问敏感数据",
@@ -532,7 +514,7 @@ def _exec_code(args):
 
 
 def _exec_query_database(args):
-    """数据库查询（只读 SELECT）"""
+    """数据库查询（只读 SELECT，带表级访问控制）"""
     sql = args.get("sql", "").strip()
     if not sql:
         return json.dumps({"error": "SQL 语句不能为空"})
@@ -546,6 +528,18 @@ def _exec_query_database(args):
     for kw in forbidden_keywords:
         if kw in sql_upper.split():
             return json.dumps({"error": f"SQL 包含禁止操作: {kw}"})
+
+    # 表级访问控制：当代码库查询关闭时，禁止查询代码库相关的表
+    if not current_app.config.get("CODE_INDEX_ENABLED", False):
+        code_index_tables = [
+            "data_code_",      # 代码索引向量表前缀 (data_code_summaries_*, data_code_chunks_*)
+            "code_repositories",  # 代码仓库配置表
+            "indexed_files",      # 文件索引记录表
+        ]
+        sql_lower = sql.lower()
+        for table_prefix in code_index_tables:
+            if table_prefix in sql_lower:
+                return json.dumps({"error": f"代码库查询功能已关闭，不允许访问 {table_prefix}* 相关表"})
 
     try:
         from app.extensions import db

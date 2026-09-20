@@ -39,21 +39,21 @@ _interrupt_events = {}
 
 @chat_bp.route("/")
 def index():
-    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).all()
+    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).limit(50).all()
     return render_template("index.html", conversations=conversations)
 
 
 @chat_bp.route("/knowledge")
 def knowledge_page():
     """知识库管理页面"""
-    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).all()
+    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).limit(50).all()
     return render_template("knowledge.html", conversations=conversations)
 
 
 @chat_bp.route("/code-repos")
 def code_repos_page():
     """代码库管理页面"""
-    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).all()
+    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).limit(50).all()
     return render_template("code_repos.html", conversations=conversations)
 
 

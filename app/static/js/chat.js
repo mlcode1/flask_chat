@@ -58,6 +58,12 @@
         
         // 接收 token
         socket.on('token', (data) => {
+            // 如果当前没有 message_id 但有 bubble，说明是刚发送的消息，自动绑定
+            if (!currentMessageId && currentBubble) {
+                currentMessageId = data.message_id;
+                console.log('[WS] Auto-bound message_id from first token:', currentMessageId);
+            }
+            
             if (!currentBubble || currentMessageId !== data.message_id) return;
             
             fullContent += data.token;
@@ -70,6 +76,12 @@
         
         // 接收工具调用
         socket.on('tool_calls', (data) => {
+            // 同样支持自动绑定
+            if (!currentMessageId && currentBubble) {
+                currentMessageId = data.message_id;
+                console.log('[WS] Auto-bound message_id from tool_calls:', currentMessageId);
+            }
+            
             if (!currentBubble || currentMessageId !== data.message_id) return;
             
             toolCalls = toolCalls.concat(data.tool_calls);
@@ -686,7 +698,15 @@
                         <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
                     </div>`;
             } else {
-                messages.forEach(m => addMessage(m.role, m.content, m.interrupted, m.verification, m.id, m.tool_calls));
+                // 过滤掉正在生成的消息（避免显示空白气泡）
+                const filteredMessages = messages.filter(m => {
+                    if (m.role === 'assistant' && m.status === 'generating') {
+                        // 如果有内容，保留；如果为空，跳过
+                        return m.content && m.content.trim().length > 0;
+                    }
+                    return true;
+                });
+                filteredMessages.forEach(m => addMessage(m.role, m.content, m.interrupted, m.verification, m.id, m.tool_calls));
             }
             
             // 加入新房间
@@ -725,6 +745,13 @@
         fullContent = "";
         toolCalls = [];
 
+        // 先注册 message_created 监听器，再 emit chat_message
+        // 避免事件在监听器注册前到达导致丢失
+        socket.once('message_created', (data) => {
+            currentMessageId = data.message_id;
+            console.log('[WS] Message created:', currentMessageId);
+        });
+
         // 通过 WebSocket 发送消息
         socket.emit('chat_message', {
             conversation_id: currentConvId,
@@ -733,10 +760,22 @@
             image_urls: []
         });
         
-        // 等待服务器返回 message_created 事件
-        socket.once('message_created', (data) => {
-            currentMessageId = data.message_id;
-        });
+        // 备用方案：如果 3 秒内没收到 message_created，轮询获取最新的 assistant 消息 ID
+        setTimeout(() => {
+            if (!currentMessageId && currentBubble) {
+                console.log('[WS] message_created 超时，轮询获取消息 ID');
+                fetch(`/api/conversations/${currentConvId}/messages`)
+                    .then(res => res.json())
+                    .then(messages => {
+                        const lastAssistant = messages.filter(m => m.role === 'assistant').pop();
+                        if (lastAssistant) {
+                            currentMessageId = lastAssistant.id;
+                            console.log('[WS] 轮询获取到 message_id:', currentMessageId);
+                        }
+                    })
+                    .catch(err => console.error('[WS] 轮询失败:', err));
+            }
+        }, 3000);
     }
 
     function createCursor() {

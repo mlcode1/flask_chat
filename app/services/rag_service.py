@@ -160,15 +160,34 @@ def _bm25_score(query_tokens, doc_idx, index):
 
 
 def _hybrid_search(query, top_k=None):
-    """BM25 + 向量混合检索（优化版）"""
+    """BM25 + 向量混合检索（优化版，含重试机制）"""
     if top_k is None:
         top_k = current_app.config["RAG_TOP_K"]
 
     vector_weight = current_app.config.get("RAG_VECTOR_WEIGHT", 0.7)
     bm25_weight = current_app.config.get("RAG_BM25_WEIGHT", 0.3)
 
-    # 1. 向量检索（多取一些用于融合）
-    query_embedding = get_embeddings([query])[0]
+    # 确保数据库会话干净（WebSocket 线程中可能有残留事务）
+    try:
+        db.session.rollback()
+    except Exception:
+        pass
+
+    # 1. 向量检索（带重试，解决首次查询 embedding 服务冷启动问题）
+    query_embedding = None
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            query_embedding = get_embeddings([query])[0]
+            break
+        except Exception as e:
+            if attempt < max_retries:
+                logger.warning(f"Embedding 请求失败 (尝试 {attempt + 1}/{max_retries + 1}): {e}")
+                import time
+                time.sleep(1)
+            else:
+                logger.error(f"Embedding 请求最终失败: {e}")
+                return []
     vector_results = (
         db.session.query(
             DocumentChunk, 

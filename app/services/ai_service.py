@@ -7,7 +7,7 @@ import threading
 from openai import OpenAI
 from flask import current_app
 from langsmith import traceable
-from app.services.tool_service import get_tools, execute_tool, is_dangerous_tool, get_dangerous_tool_description
+from app.services.tool_service import get_tools, execute_tool, is_dangerous_tool, get_dangerous_tool_reason
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,7 @@ class AIService:
                     on_confirm_request({
                         "confirm_id": confirm_id,
                         "tool_name": tool_name,
-                        "description": get_dangerous_tool_description(tool_name),
+                        "description": get_dangerous_tool_reason(tool_name),
                         "arguments": tool_args
                     })
                     
