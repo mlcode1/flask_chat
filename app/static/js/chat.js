@@ -689,7 +689,9 @@
         
         try {
             const res = await fetch(`/api/conversations/${convId}/messages`);
-            const messages = await res.json();
+            const data = await res.json();
+            // 兼容分页格式：{messages: [...], has_more: bool} 和旧的直接返回数组
+            const messages = Array.isArray(data) ? data : (data.messages || []);
             messagesContainer.innerHTML = "";
             if (messages.length === 0) {
                 messagesContainer.innerHTML = `
@@ -766,8 +768,9 @@
                 console.log('[WS] message_created 超时，轮询获取消息 ID');
                 fetch(`/api/conversations/${currentConvId}/messages`)
                     .then(res => res.json())
-                    .then(messages => {
-                        const lastAssistant = messages.filter(m => m.role === 'assistant').pop();
+                    .then(data => {
+                        const msgs = Array.isArray(data) ? data : (data.messages || []);
+                        const lastAssistant = msgs.filter(m => m.role === 'assistant').pop();
                         if (lastAssistant) {
                             currentMessageId = lastAssistant.id;
                             console.log('[WS] 轮询获取到 message_id:', currentMessageId);

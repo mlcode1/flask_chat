@@ -54,6 +54,10 @@ class Config:
     CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").lower() == "true"
     CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", "1"))
     CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "1000"))
+    
+    # Redis 配置
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    REDIS_ENABLED = os.getenv("REDIS_ENABLED", "false").lower() == "true"
 
     # Retry (错误恢复)
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
@@ -89,3 +93,7 @@ class Config:
     CODE_INDEX_MAX_CHARS = int(os.getenv("CODE_INDEX_MAX_CHARS", "1500"))
     CODE_INDEX_SUPPORTED_EXTS = [ext.strip() for ext in os.getenv("CODE_INDEX_SUPPORTED_EXTS", ".py,.js,.ts,.tsx,.jsx,.java,.go,.rs,.cpp,.c,.h,.md,.txt,.json,.yaml,.yml").split(",")]
     CODE_INDEX_EXCLUDE_PATTERNS = [pattern.strip() for pattern in os.getenv("CODE_INDEX_EXCLUDE_PATTERNS", ".git,__pycache__,node_modules,venv,.venv,dist,build,*.pyc,.DS_Store").split(",")]
+
+    # Logging (结构化日志)
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    LOG_FORMAT = os.getenv("LOG_FORMAT", "human")  # 'human' or 'json'

@@ -41,6 +41,9 @@ class Conversation(db.Model):
 
 class Message(db.Model):
     __tablename__ = "messages"
+    __table_args__ = (
+        db.Index('idx_message_conversation_created', 'conversation_id', 'created_at'),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     conversation_id = db.Column(db.Integer, db.ForeignKey("conversations.id"), nullable=False)

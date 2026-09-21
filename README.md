@@ -6,36 +6,43 @@
 
 ### 项目简介
 
-Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模型切换、流式输出、工具调用、上下文压缩与长期记忆、RAG（检索增强生成）知识库系统、LangSmith 全链路监控、AI 回答结果验证以及**代码库索引管理**。数据存储在 PostgreSQL（含 pgvector 向量扩展）中，前端采用原生 JavaScript 实现单页应用。
+Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模型切换、WebSocket 流式输出、工具调用、上下文压缩与长期记忆、RAG（检索增强生成）知识库系统、LangSmith 全链路监控、AI 回答结果验证以及**代码库索引管理**。数据存储在 PostgreSQL（含 pgvector 向量扩展）中，前端采用原生 JavaScript 单页应用。
 
 ### 功能特性
 
 - **多模型切换** — 支持配置多个大语言模型，用户可在对话中自由切换；兼容 OpenAI API 协议的任意服务（包括 Ollama 本地模型）
-- **流式输出** — 基于 Server-Sent Events（SSE）实现逐字流式响应
+- **WebSocket 流式输出** — 基于 Flask-SocketIO + eventlet 实现实时双向通信，逐字流式响应
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
 - **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、数据库查询、文件读取、知识库检索、网页搜索等工具；`web_search` 支持 Tavily / Bing / DuckDuckGo 多源自动切换
 - **工具开关控制** — 知识库查询和代码库查询工具可通过页面顶部开关实时启用/禁用，无需重启服务
-- **RAG 知识检索** — 上传文档后，AI 可通过工具调用自动检索知识库回答问题；支持 BM25 + 向量混合检索、多查询重写、结果重排序
+- **RAG 知识检索** — 上传文档后，AI 可通过工具调用自动检索知识库回答问题；支持 BM25 + 向量混合检索（BM25 索引缓存，避免重复构建）、多查询重写、结果重排序
 - **代码库索引管理** — 通过 Web UI 管理代码仓库配置（名称 + 本地路径），支持全量构建与增量构建（混合方案：文件修改时间 + SHA256 哈希双重过滤），构建过程实时进度条，支持取消任务；AI 在对话中通过 `search_code` 工具自动检索相关代码片段，自动选择已索引仓库
 - **本地模型支持** — 通过 Ollama 可直接使用本地部署的大语言模型和 Embedding 模型，无需任何云服务；Embedding 也可接入第三方服务
 - **多轮记忆与上下文压缩** — 结构化摘要 + 长期记忆，跨轮次保留关键信息；对话过长时自动压缩历史消息，节省 Token 用量
 - **结果验证（Result Verification）** — 可选开关，开启后由另一个 Agent 对 AI 回答进行事实、逻辑、完整性与清晰度的多维度验证，支持自动验证与手动验证
 - **对话命名与重命名** — 新建对话时弹窗输入标题（留空则默认）；侧边栏对话项点击编辑按钮（✎）即可随时重命名
 - **协作与分享** — 一键生成分享链接（`/share/<token>` 公开查看页）、对话导出（Markdown / JSON / TXT）
-- **响应缓存** — 相同问题 + 相同上下文命中缓存时直接返回，提升响应速度
+- **消息分页** — 支持游标分页加载历史消息，避免长对话一次性加载所有消息
+- **响应缓存** — 支持内存缓存和 Redis 缓存双模式，相同问题 + 相同上下文命中缓存时直接返回
 - **错误恢复** — 自动重试（指数退避）、主模型失败降级到备用模型、健康检查接口
 - **交互体验** — Markdown 渲染（含代码高亮、一键复制）、消息点赞/点踩反馈
 - **可视化与调试** — Token 统计面板 + 工具调用可视化，调试面板展示系统/缓存/模型状态
 - **LangSmith 监控** — 通过 LangSmith 实现 LLM 调用、RAG 检索、上下文构建等关键流程的全链路可观测
+- **统一错误处理** — 基于 APIError 基类的统一异常体系，全局错误处理器保证一致的响应格式
+- **结构化日志** — 支持 JSON 格式和人类可读格式，请求级追踪（request_id）
+- **性能监控** — 内置请求耗时、模型调用、工具执行等关键指标的监控
 - **安全防护** — 可选 API Key 鉴权、Prompt Injection 输入过滤、XSS 防护（前后端双重消毒）、API 限流（支持 Redis 共享计数）、输入校验、审计日志
+- **Docker 容器化** — 提供 Dockerfile 和 docker-compose.yml，支持一键容器化部署
 
 ### 技术栈
 
 | 组件 | 技术 |
 |------|------|
 | 后端框架 | Flask |
+| 实时通信 | Flask-SocketIO + eventlet（WebSocket） |
 | ORM | Flask-SQLAlchemy |
 | 数据库 | PostgreSQL + pgvector |
+| 缓存 | 内存缓存 / Redis（双模式，可切换） |
 | LLM 接口 | OpenAI SDK（兼容任意 OpenAI 协议的服务） |
 | Embedding 模型 | Ollama（qwen3-embedding:8b）或第三方 Embedding 服务 |
 | 向量检索 | pgvector（余弦相似度 + BM25 混合检索） |
@@ -44,15 +51,27 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 | 可观测性 | LangSmith（`@traceable` 装饰器 + 环境变量） |
 | 安全 | Flask-Limiter（限流）、bleach + DOMPurify（XSS 防护） |
 | 代码索引查询 | psycopg2（直连 pgvector 索引） |
-| 前端 | 原生 HTML / CSS / JavaScript（marked.js 渲染 Markdown） |
+| 容器化 | Docker + docker-compose |
+| 前端 | 原生 HTML / CSS / JavaScript（ES6 模块化 + marked.js 渲染 Markdown） |
 
 ### 项目结构
 
 ```
 flask_chat/
-├── run.py                             # 启动入口
+├── run.py                             # 启动入口（eventlet.monkey_patch）
 ├── requirements.txt                   # Python 依赖
 ├── .env.example                       # 环境变量模板
+├── Dockerfile                         # Docker 镜像构建
+├── docker-compose.yml                 # Docker Compose 编排
+├── docs/
+│   └── api.md                         # API 文档
+├── tests/                             # 单元测试 & 集成测试
+│   ├── conftest.py                    # pytest 配置和 fixtures
+│   ├── test_utils.py                  # 工具函数测试
+│   ├── test_models.py                 # 数据模型测试
+│   └── test_chat_api.py              # API 集成测试
+├── scripts/
+│   └── diagnose_index.py             # 索引诊断脚本
 ├── migrations/                        # 数据库迁移脚本（按日期命名）
 │   ├── 2026-09-11_add_advanced_features.sql
 │   ├── 2026-09-11_add_memory_fields.sql
@@ -61,11 +80,16 @@ flask_chat/
 │   ├── 2026-09-17_add_progress_fields.sql
 │   └── 2026-09-18_incremental_index.sql
 └── app/
-    ├── __init__.py                    # 应用工厂（create_app + 启动清理）
+    ├── __init__.py                    # 应用工厂（create_app + 启动清理 + 扩展初始化）
     ├── config.py                      # 配置类
+    ├── errors.py                      # 统一错误处理（APIError 基类 + 全局处理器）
     ├── extensions.py                  # Flask 扩展（SQLAlchemy）
-    ├── models.py                      # 数据模型
+    ├── logging_config.py              # 结构化日志配置
     ├── middleware.py                  # 中间件（免责声明等）
+    ├── models.py                      # 数据模型
+    ├── monitoring.py                  # 性能监控（请求耗时、指标收集）
+    ├── utils.py                       # 共享工具函数（token 估算等）
+    ├── websocket.py                   # WebSocket 事件处理器（实时通信核心）
     ├── routes/
     │   ├── chat.py                    # 对话、验证、分享、导出、反馈、审计、页面路由
     │   ├── rag.py                     # RAG 知识库路由
@@ -73,21 +97,31 @@ flask_chat/
     ├── services/
     │   ├── ai_service.py             # AI 服务（流式输出 + 工具调用循环 + 模型降级）
     │   ├── context_service.py        # 上下文管理（窗口裁剪 + 压缩 + 长期记忆）
-    │   ├── rag_service.py            # RAG 服务（解析/分块/嵌入/存储/混合检索）
+    │   ├── rag_service.py            # RAG 服务（解析/分块/嵌入/存储/混合检索/BM25缓存）
     │   ├── verifier_service.py       # 结果验证服务（独立 Agent 验证）
     │   ├── tool_service.py           # 工具定义与执行（多源 web_search 等）
-    │   ├── cache_service.py          # 响应缓存
+    │   ├── cache_service.py          # 响应缓存（内存/Redis 双模式）
     │   ├── retry_service.py          # 重试与降级（指数退避 + fallback）
     │   ├── security_service.py       # 安全（API Key 认证 / 注入过滤 / 审计日志）
     │   ├── code_index_service.py     # 代码索引查询服务（pgvector 向量搜索）
-    │   └── code_index_builder.py     # 代码索引构建服务（LlamaIndex + 全量/增量）
+    │   └── code_index_builder.py     # 代码索引构建服务（LlamaIndex + 全量/增量 + 混合摘要）
     ├── static/
     │   ├── css/style.css
     │   └── js/
-    │       ├── chat.js               # 主对话页交互逻辑
+    │       ├── chat.js               # 主入口（ES6 模块化，~470 行）
     │       ├── knowledge.js          # 知识库管理页独立逻辑
     │       ├── code_repos.js         # 代码库管理页独立逻辑
-    │       └── marked.min.js         # Markdown 渲染（本地）
+    │       ├── marked.min.js         # Markdown 渲染（本地）
+    │       ├── socket.io.min.js      # Socket.IO 客户端（本地）
+    │       └── modules/              # 前端模块化
+    │           ├── utils.js          # 通用工具函数
+    │           ├── socket.js         # WebSocket 连接管理
+    │           ├── message.js        # 消息渲染和格式化
+    │           ├── conversation.js   # 对话管理
+    │           ├── config.js         # 配置管理
+    │           ├── documents.js      # 知识库文档管理
+    │           ├── code-repos.js     # 代码库索引管理
+    │           └── debug.js          # 调试工具
     └── templates/
         ├── index.html                # 主对话页
         ├── knowledge.html            # 知识库管理页（独立）
@@ -100,11 +134,11 @@ flask_chat/
 | 模型 | 表名 | 说明 |
 |------|------|------|
 | `Conversation` | `conversations` | 对话（含 `summary` 摘要、`memory` 长期记忆） |
-| `Message` | `messages` | 消息（含 `tool_calls`、`verification`、`token_count`、`feedback`、`image_urls` 等） |
+| `Message` | `messages` | 消息（含 `tool_calls`、`verification`、`token_count`、`feedback`、`image_urls`、`status` 等，复合索引 `conversation_id + created_at`） |
 | `Document` | `documents` | 知识库文档 |
 | `DocumentChunk` | `document_chunks` | 文档分块（含向量 `embedding`） |
 | `SharedConversation` | `shared_conversations` | 分享链接 |
-| `ConversationTemplate` | `conversation_templates` | 对话模板 |
+| `ConversationTemplate` | `conversation_templates` | 对话模板（预留） |
 | `AuditLog` | `audit_logs` | 审计日志 |
 | `CodeRepository` | `code_repositories` | 代码仓库配置（名称、路径、索引状态、进度、模式等） |
 | `IndexedFile` | `indexed_files` | 文件索引记录（路径、SHA256 哈希、修改时间，用于增量索引） |
@@ -114,6 +148,8 @@ flask_chat/
 - Python 3.10+
 - PostgreSQL 15+（需安装 pgvector 扩展）
 - Ollama（用于本地 Embedding 模型，也可选用于本地大语言模型）
+- Redis（可选，生产环境缓存加速）
+- Docker & Docker Compose（可选，容器化部署）
 
 ### 快速开始
 
@@ -122,8 +158,6 @@ flask_chat/
 ```bash
 git clone <repo-url>
 cd flask_chat
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -192,9 +226,18 @@ cp .env.example .env
 | `API_KEY` | API 鉴权密钥（留空则跳过鉴权） | 空 |
 | `INPUT_FILTER_ENABLED` | 是否启用 Prompt Injection 输入过滤 | `true` |
 | `RATELIMIT_STORAGE_URL` | API 限流存储后端（`memory://` 或 `redis://host:port`） | `memory://` |
+| **缓存配置** | | |
 | `CACHE_ENABLED` | 是否启用响应缓存 | `true` |
 | `CACHE_TTL_HOURS` | 缓存有效期（小时） | `1` |
+| `CACHE_MAX_SIZE` | 内存缓存最大条目数 | `1000` |
+| `REDIS_ENABLED` | 是否启用 Redis 缓存（`false` 时使用内存缓存） | `false` |
+| `REDIS_URL` | Redis 连接地址 | `redis://localhost:6379/0` |
+| **日志配置** | | |
+| `LOG_LEVEL` | 日志级别 | `INFO` |
+| `LOG_FORMAT` | 日志格式（`human` 人类可读 / `json` 结构化） | `human` |
+| **重试与降级** | | |
 | `MAX_RETRIES` | 最大重试次数 | `3` |
+| `RETRY_DELAY_SECONDS` | 重试间隔（秒） | `2` |
 | `FALLBACK_MODEL` | 备用模型（主模型失败时降级） | 空 |
 | `VERIFY_ENABLED` | 是否启用结果验证 | `false` |
 | `VERIFY_MODEL` | 验证 Agent 使用的模型（留空则与主模型一致） | 空 |
@@ -211,7 +254,7 @@ cp .env.example .env
 | `CODE_INDEX_DB_PASSWORD` | 代码索引数据库密码 | - |
 | `CODE_INDEX_DB_NAME` | 代码索引数据库名称 | `flask_chat` |
 | `CODE_INDEX_DEFAULT_REPO` | 默认代码仓库名称（搜索时优先使用） | `flask_chat` |
-| `CODE_INDEX_TOP_K` | 代码搜索返回结果数量 | `8` |
+| `CODE_INDEX_TOP_K` | 代码搜索返回结果数量 | `5` |
 | **索引构建配置** | | |
 | `CODE_INDEX_CHUNK_LINES` | 代码分块行数 | `100` |
 | `CODE_INDEX_CHUNK_LINES_OVERLAP` | 代码分块重叠行数 | `10` |
@@ -225,7 +268,7 @@ cp .env.example .env
 
 **6. 数据库迁移**
 
-当 `models.py` 中的模型发生变化（新增字段、新表等），已有数据库不会自动更新，需要手动执行迁移脚本。本项目采用**手写 SQL 脚本**的方式进行迁移（脚本统一放在 `migrations/` 目录，按日期命名，如 `2026-09-11_add_xxx.sql`）。
+当 `models.py` 中的模型发生变化（新增字段、新表等），已有数据库不会自动更新，需要手动执行迁移脚本。本项目采用**手写 SQL 脚本**的方式进行迁移（脚本统一放在 `migrations/` 目录，按日期命名）。
 
 **执行已有迁移脚本：**
 
@@ -242,13 +285,8 @@ psql -U <username> -d flask_chat -f migrations/2026-09-18_incremental_index.sql
 
 1. 修改 `app/models.py`，添加新字段或新表
 2. 在 `migrations/` 目录新建脚本，命名格式 `YYYY-MM-DD_描述.sql`
-3. 脚本内容使用 `IF NOT EXISTS`，保证可重复执行，例如：
-
-```sql
-ALTER TABLE messages ADD COLUMN IF NOT EXISTS new_field VARCHAR(100) DEFAULT NULL;
-```
-
-4. 按日期顺序依次执行新脚本即可。建议在脚本头部用注释说明本次变更内容。
+3. 脚本内容使用 `IF NOT EXISTS`，保证可重复执行
+4. 按日期顺序依次执行新脚本
 
 **7. 启动应用**
 
@@ -256,13 +294,33 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS new_field VARCHAR(100) DEFAULT NUL
 python run.py
 ```
 
+> `run.py` 在入口处自动执行 `eventlet.monkey_patch()`，确保 WebSocket 正常工作。
+
 访问 `http://localhost:8080` 即可使用。
 
-生产环境可使用 Gunicorn：
+### Docker 部署
 
 ```bash
-gunicorn run:app -w 4 -b 0.0.0.0:8080
+# 构建并启动所有服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f app
+
+# 停止
+docker-compose down
 ```
+
+### 缓存配置
+
+系统支持两种缓存后端，通过 `REDIS_ENABLED` 环境变量切换：
+
+| 模式 | 配置 | 适用场景 |
+|------|------|----------|
+| 内存缓存 | `REDIS_ENABLED=false` | 开发/测试环境，单进程部署 |
+| Redis 缓存 | `REDIS_ENABLED=true` | 生产环境，多进程/多实例部署 |
+
+Redis 模式下，缓存在多个 worker 进程间共享，重启不丢失。
 
 ### 使用 Ollama 本地大语言模型
 
@@ -289,7 +347,6 @@ ollama pull qwen2.5:3b
 2. 修改 `.env` 中的 LLM 配置：
 
 ```bash
-# 将 LLM 指向本地 Ollama
 OPENAI_BASE_URL=http://localhost:11434/v1
 OPENAI_API_KEY=ollama                # Ollama 不校验 key，但 SDK 要求非空
 OPENAI_MODEL=qwen2.5:7b              # 默认模型（必须带 tag 如 :7b）
@@ -299,14 +356,10 @@ AVAILABLE_MODELS=qwen2.5:7b,qwen2.5:14b,llama3.1:8b
 3. （可选）关闭外部服务，实现完全离线：
 
 ```bash
-LANGCHAIN_TRACING_V2=false           # 关闭 LangSmith 上报
+LANGCHAIN_TRACING_V2=false
 ```
 
-4. 重启 Flask 应用即可：
-
-```bash
-python run.py
-```
+4. 重启 Flask 应用即可。
 
 **常见问题：**
 
@@ -320,13 +373,11 @@ python run.py
 Embedding 与大语言模型相互独立，可分别配置。若 Embedding 使用第三方服务（而非 Ollama），只需调整 `.env`：
 
 ```bash
-EMBEDDING_BASE_URL=https://api.example.com/v1   # 第三方 Embedding 服务地址
-EMBEDDING_API_KEY=your-real-api-key             # 第三方真实 Key
-EMBEDDING_MODEL=text-embedding-3-large          # 第三方模型名
-EMBEDDING_DIM=3072                              # 对应向量维度
+EMBEDDING_BASE_URL=https://api.example.com/v1
+EMBEDDING_API_KEY=your-real-api-key
+EMBEDDING_MODEL=text-embedding-3-large
+EMBEDDING_DIM=3072
 ```
-
-RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM，因此 Embedding 换第三方后知识库功能可正常运行。只需确保 `EMBEDDING_DIM` 与所选模型的实际输出维度一致。
 
 ### 代码库索引管理
 
@@ -347,12 +398,13 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 - 取消正在进行的索引任务
 - 搜索测试
 - 敏感内容自动过滤（API Key、密码、Token 等）
+- **混合摘要方案**：代码文件使用零 token 的结构化元数据提取（函数签名、类定义、导入声明），非代码文件使用 LLM 摘要
 
 **索引原理：**
 
 - 使用 LlamaIndex 的 `CodeSplitter`（基于 tree-sitter）进行语法感知的代码分割
 - 使用 `OllamaEmbedding`（qwen3-embedding:8b，4096 维）生成代码向量
-- 存储到 PostgreSQL 的 `data_code_embeddings_{repo_name}` 表（PGVectorStore 自动加 `data_` 前缀）
+- 存储到 PostgreSQL 的 `data_code_summaries_{repo_name}`（摘要层）和 `data_code_chunks_{repo_name}`（代码块层）表
 - 增量索引时，通过 `indexed_files` 表记录每个文件的路径和哈希值，对比变化后只处理差异文件
 
 **搜索时的仓库选择逻辑：**
@@ -364,17 +416,31 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 
 - **对话** — 在输入框输入消息，按 Enter 发送，Shift+Enter 换行
 - **新建对话** — 点击左侧「+ 新对话」会弹出标题输入框，可直接命名（留空则用默认标题，发消息后由 AI 自动生成标题）
-- **重命名对话** — 鼠标悬停在左侧某条对话上，点击出现的编辑按钮（✎）即可原地重命名（回车或点击别处保存，Esc 取消）
+- **重命名对话** — 鼠标悬停在左侧某条对话上，点击出现的编辑按钮（✎）即可原地重命名
 - **切换模型** — 在顶部下拉框选择不同的大语言模型
 - **打断生成** — AI 回复时点击「打断」按钮停止生成
 - **知识库管理** — 侧边栏点击「知识库管理」进入独立页面，支持上传文档（`.txt`、`.md`、`.pdf`、`.docx`）、删除文档、查看统计信息
 - **代码库管理** — 侧边栏点击「代码库管理」进入独立页面，支持添加代码仓库、全量/增量构建索引、查看进度、取消任务、搜索测试、删除仓库
-- **结果验证** — 顶部打开「结果验证」开关后，AI 回答完成后会自动触发验证；也可点击消息下方的「🔍 结果验证」按钮对历史回答手动验证。验证结果以卡片形式展示，包括通过/未通过、置信度、问题点等
+- **结果验证** — 顶部打开「结果验证」开关后，AI 回答完成后会自动触发验证；也可点击消息下方的「🔍 结果验证」按钮对历史回答手动验证
 - **分享对话** — 点击顶部「分享」按钮生成公开链接，其他人可通过 `/share/<token>` 查看（只读）
 - **导出对话** — 点击顶部「导出」按钮，选择 Markdown / JSON / TXT 格式下载
 - **反馈** — 点击消息下方的 👍 / 👎 对回答进行评价
 - **调试面板** — 点击右下角 🐛 按钮查看系统状态、缓存状态、可用模型与 Token 统计
-- **LangSmith 监控** — 启动应用后，在 [LangSmith](https://smith.langchain.com) 对应项目下查看 LLM 调用、RAG 检索、上下文构建的全链路追踪
+
+### 测试
+
+```bash
+# 运行所有测试
+pytest tests/
+
+# 运行特定测试
+pytest tests/test_utils.py
+pytest tests/test_models.py
+pytest tests/test_chat_api.py
+
+# 查看详细输出
+pytest tests/ -v -s
+```
 
 ### API 接口
 
@@ -388,9 +454,7 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 | `GET` | `/api/models` | 获取可用模型列表 |
 | `POST` | `/api/conversations` | 创建新对话（请求体可选 `{"title": "..."}`） |
 | `PATCH` | `/api/conversations/<id>` | 重命名对话（请求体：`{"title": "..."}`） |
-| `GET` | `/api/conversations/<id>/messages` | 获取对话消息（含 `tool_calls`、`token_count` 等） |
-| `POST` | `/api/conversations/<id>/chat` | 发送消息并流式获取回复（SSE） |
-| `POST` | `/api/conversations/<id>/interrupt` | 打断当前对话生成 |
+| `GET` | `/api/conversations/<id>/messages` | 获取对话消息（支持分页 `?limit=50&before=<msg_id>`） |
 | `DELETE` | `/api/conversations/<id>` | 删除对话 |
 | `GET` | `/api/conversations/<id>/stats` | 获取对话 Token 统计 |
 
@@ -457,18 +521,22 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 | `GET` | `/api/config/disclaimer` | 获取免责声明配置 |
 | `POST` | `/api/config/disclaimer` | 更新免责声明配置 |
 
-#### 聊天流式事件（SSE）
+#### WebSocket 事件
 
-`/api/conversations/<id>/chat` 通过 SSE 推送以下事件类型：
+聊天消息通过 WebSocket（Socket.IO）实时通信，客户端连接后通过以下事件交互：
 
-| 事件字段 | 说明 |
-|----------|------|
-| `token` | 增量文本片段 |
-| `tool_calls` | 工具调用记录（含工具名、参数、结果） |
-| `done` | 回答完成，附带 `content`、`message_id`、`token_count` |
-| `verifying` | 验证开关开启时，回答完成后触发验证 |
-| `verified` | 验证完成，附带 `is_correct`、`confidence`、`explanation`、`issues` 等结构化结果 |
-| `error` | 错误信息 |
+| 事件 | 方向 | 说明 |
+|------|------|------|
+| `chat_message` | → 服务端 | 发送消息（`conversation_id`, `content`, `model`） |
+| `token` | ← 客户端 | 接收增量文本片段 |
+| `tool_calls` | ← 客户端 | 接收工具调用记录 |
+| `generation_completed` | ← 客户端 | AI 回复完成 |
+| `generation_error` | ← 客户端 | 生成失败 |
+| `stop_generation` | → 服务端 | 打断生成 |
+| `join` | → 服务端 | 加入对话房间 |
+| `leave` | → 服务端 | 离开对话房间 |
+
+详细 API 文档见 `docs/api.md`。
 
 ---
 
@@ -476,466 +544,76 @@ RAG 相关业务（文档解析、分块、嵌入、混合检索）不依赖 LLM
 
 ### Introduction
 
-Flask Chat is an AI-powered chat application built with Flask. It supports multi-model switching, streaming responses, tool calling, context compression with long-term memory, a RAG (Retrieval-Augmented Generation) knowledge base, LangSmith observability, an optional AI answer verification feature, and **code repository index management**. Data is stored in PostgreSQL (with the pgvector extension), and the frontend is a vanilla JavaScript single-page application.
+Flask Chat is an AI-powered chat application built with Flask. It supports multi-model switching, WebSocket streaming responses, tool calling, context compression with long-term memory, a RAG (Retrieval-Augmented Generation) knowledge base, LangSmith observability, an optional AI answer verification feature, and **code repository index management**. Data is stored in PostgreSQL (with the pgvector extension), and the frontend is a vanilla JavaScript ES6 modular application.
 
 ### Features
 
 - **Multi-Model Support** — Configure multiple LLMs and switch between them during conversations; compatible with any OpenAI-protocol service (including Ollama local models)
-- **Streaming Output** — Token-by-token streaming responses via Server-Sent Events (SSE)
+- **WebSocket Streaming** — Real-time bidirectional communication via Flask-SocketIO + eventlet, token-by-token streaming responses
 - **Stream Interruption** — Stop AI generation at any time
 - **Tool Calling** — Function Calling with built-in tools: current time, math calculation, code execution, database query, file reading, knowledge-base search, web search; `web_search` supports Tavily / Bing / DuckDuckGo with automatic fallback
-- **Tool Toggle Control** — Knowledge base search and code repository search tools can be enabled/disabled in real-time via header toggles, no service restart required
-- **RAG Knowledge Base** — Upload documents and let the AI automatically search the knowledge base when answering questions; supports BM25 + vector hybrid search, multi-query rewriting, and result reranking
-- **Code Index Management** — Manage code repository configurations via Web UI (name + local path), supports full and incremental indexing (hybrid approach: file mtime + SHA256 hash double filtering), real-time progress bar during indexing, task cancellation; AI automatically retrieves relevant code snippets during conversation through the `search_code` tool with automatic repo selection
-- **Local Model Support** — Run both LLM and Embedding models locally via Ollama, no cloud service required; embedding can also use a third-party service
-- **Multi-turn Memory & Context Compression** — Structured summarization + long-term memory across turns; automatically compresses older messages when conversations get too long
-- **Result Verification** — Optional toggle that runs a second agent to validate every AI answer for accuracy, logic, completeness, and clarity. Supports both auto-verification and manual on-demand verification
-- **Conversation Naming & Renaming** — Enter a title when creating a new conversation (leave blank for default); click the edit button (✎) on any conversation in the sidebar to rename it at any time
-- **Sharing & Export** — One-click share links (`/share/<token>` public view) and conversation export (Markdown / JSON / TXT)
-- **Response Cache** — Returns cached results when the same question + context is repeated, improving response speed
-- **Error Recovery** — Automatic retry with exponential backoff, fallback to a backup model, and a health check endpoint
-- **Interaction** — Markdown rendering (syntax highlighting, one-click copy) and message like/dislike feedback
-- **Visualization & Debugging** — Token statistics panel + tool-call visualization; a debug panel shows system/cache/model status
-- **LangSmith Observability** — End-to-end tracing for LLM calls, RAG retrieval, and context building
-- **Security** — Optional API key auth, Prompt Injection input filtering, XSS protection (frontend + backend sanitization), API rate limiting (supports Redis shared storage), input validation, and audit logging
+- **Tool Toggle Control** — Knowledge base search and code repository search tools can be enabled/disabled in real-time via header toggles
+- **RAG Knowledge Base** — Upload documents and let the AI automatically search the knowledge base when answering questions; supports BM25 + vector hybrid search (with BM25 index caching), multi-query rewriting, and result reranking
+- **Code Index Management** — Manage code repository configurations via Web UI, supports full and incremental indexing with real-time progress bar and task cancellation; hybrid summary approach (structural extraction for code files, LLM for non-code files)
+- **Local Model Support** — Run both LLM and Embedding models locally via Ollama
+- **Multi-turn Memory & Context Compression** — Structured summarization + long-term memory across turns
+- **Result Verification** — Optional toggle that runs a second agent to validate every AI answer
+- **Message Pagination** — Cursor-based pagination for loading historical messages
+- **Response Cache** — Dual-mode caching: in-memory (development) or Redis (production)
+- **Error Recovery** — Automatic retry with exponential backoff, fallback to a backup model
+- **Unified Error Handling** — APIError base class with global error handlers for consistent response format
+- **Structured Logging** — JSON and human-readable formats with request-level tracing
+- **Performance Monitoring** — Built-in request timing, model call metrics, and tool execution tracking
+- **Docker Containerization** — Dockerfile and docker-compose.yml for one-command deployment
+- **Security** — Optional API key auth, Prompt Injection filtering, XSS protection, rate limiting, audit logging
 
 ### Tech Stack
 
 | Component | Technology |
 |-----------|------------|
 | Backend | Flask |
+| Real-time | Flask-SocketIO + eventlet (WebSocket) |
 | ORM | Flask-SQLAlchemy |
 | Database | PostgreSQL + pgvector |
+| Cache | In-memory / Redis (dual-mode, switchable) |
 | LLM Interface | OpenAI SDK (compatible with any OpenAI-protocol service) |
 | Embedding Model | Ollama (qwen3-embedding:8b) or third-party embedding service |
 | Vector Search | pgvector (cosine similarity + BM25 hybrid search) |
 | Code Index Builder | LlamaIndex + CodeSplitter (tree-sitter) + PGVectorStore |
 | File Parsing | pypdf, python-docx |
 | Observability | LangSmith (`@traceable` decorator + env vars) |
-| Security | Flask-Limiter (rate limiting), bleach + DOMPurify (XSS protection) |
-| Code Index Query | psycopg2 (direct connection to pgvector index) |
-| Frontend | Vanilla HTML / CSS / JavaScript (marked.js for Markdown) |
-
-### Project Structure
-
-```
-flask_chat/
-├── run.py                             # Entry point
-├── requirements.txt                   # Python dependencies
-├── .env.example                       # Environment template
-├── migrations/                        # Database migration scripts (date-named)
-│   ├── 2026-09-11_add_advanced_features.sql
-│   ├── 2026-09-11_add_memory_fields.sql
-│   ├── 2026-09-11_add_feedback_field.sql
-│   ├── 2026-09-17_add_code_repositories.sql
-│   ├── 2026-09-17_add_progress_fields.sql
-│   └── 2026-09-18_incremental_index.sql
-└── app/
-    ├── __init__.py                    # App factory (create_app + startup cleanup)
-    ├── config.py                      # Configuration class
-    ├── extensions.py                  # Flask extensions (SQLAlchemy)
-    ├── models.py                      # Database models
-    ├── middleware.py                  # Middleware (disclaimer, etc.)
-    ├── routes/
-    │   ├── chat.py                    # Chat, verification, sharing, export, feedback, audit, page routes
-    │   ├── rag.py                     # RAG knowledge base routes
-    │   └── code_index.py             # Code repository index management API
-    ├── services/
-    │   ├── ai_service.py             # AI service (streaming + tool call loop + model fallback)
-    │   ├── context_service.py        # Context management (window + compression + long-term memory)
-    │   ├── rag_service.py            # RAG service (parse/chunk/embed/store/hybrid search)
-    │   ├── verifier_service.py       # Result verification service (second-agent validation)
-    │   ├── tool_service.py           # Tool definitions and execution (multi-source web_search)
-    │   ├── cache_service.py          # Response cache
-    │   ├── retry_service.py          # Retry & fallback (exponential backoff)
-    │   ├── security_service.py       # Security (API key auth / injection filter / audit log)
-    │   ├── code_index_service.py     # Code index query service (pgvector vector search)
-    │   └── code_index_builder.py     # Code index builder service (LlamaIndex + full/incremental)
-    ├── static/
-    │   ├── css/style.css
-    │   └── js/
-    │       ├── chat.js               # Main chat page interaction logic
-    │       ├── knowledge.js          # Knowledge base management page logic
-    │       ├── code_repos.js         # Code repository management page logic
-    │       └── marked.min.js         # Markdown rendering (local)
-    └── templates/
-        ├── index.html                # Main chat page
-        ├── knowledge.html            # Knowledge base management page (standalone)
-        ├── code_repos.html           # Code repository management page (standalone)
-        └── shared.html               # Shared conversation view page
-```
-
-### Data Models
-
-| Model | Table | Description |
-|-------|-------|-------------|
-| `Conversation` | `conversations` | Conversation (with `summary` and `memory` fields) |
-| `Message` | `messages` | Message (with `tool_calls`, `verification`, `token_count`, `feedback`, `image_urls`, etc.) |
-| `Document` | `documents` | Knowledge base document |
-| `DocumentChunk` | `document_chunks` | Document chunk (with `embedding` vector) |
-| `SharedConversation` | `shared_conversations` | Share link |
-| `ConversationTemplate` | `conversation_templates` | Conversation template |
-| `AuditLog` | `audit_logs` | Audit log |
-| `CodeRepository` | `code_repositories` | Code repository config (name, path, index status, progress, mode, etc.) |
-| `IndexedFile` | `indexed_files` | File index record (path, SHA256 hash, mtime, for incremental indexing) |
-
-### Prerequisites
-
-- Python 3.10+
-- PostgreSQL 15+ (with pgvector extension installed)
-- Ollama (for local embedding model, and optionally for local LLM)
+| Security | Flask-Limiter, bleach + DOMPurify |
+| Containerization | Docker + docker-compose |
+| Frontend | Vanilla HTML / CSS / JavaScript (ES6 modules + marked.js) |
 
 ### Quick Start
-
-**1. Clone and install dependencies**
 
 ```bash
 git clone <repo-url>
 cd flask_chat
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env    # Edit as needed
+python run.py           # Visit http://localhost:8080
 ```
 
-**2. Install pgvector extension**
-
-Make sure pgvector is installed on your PostgreSQL server, then run:
+Or with Docker:
 
 ```bash
-psql -U <username> -d flask_chat -c "CREATE EXTENSION IF NOT EXISTS vector;"
+docker-compose up -d
 ```
 
-> The app also runs `CREATE EXTENSION IF NOT EXISTS vector` automatically on startup.
+See the Chinese section above for full configuration details.
 
-**3. Install and start Ollama**
-
-Ollama is used for local embedding models, and can also serve as the main LLM (no cloud service required):
+### Testing
 
 ```bash
-# Pull embedding model (required)
-ollama pull qwen3-embedding:8b
-
-# (Optional) Pull a local LLM for chat
-ollama pull qwen2.5:7b
-
-ollama serve
+pytest tests/ -v
 ```
 
-> **Tip:** If you only want to use Ollama for embeddings and keep the main LLM on a cloud API (e.g., OpenAI), you can skip pulling the chat model.
+### WebSocket Events
 
-**4. Configure environment variables**
+Chat messages use WebSocket (Socket.IO) for real-time communication. See the Chinese section for the full event table.
 
-Copy `.env.example` to `.env` and modify as needed:
+### API Documentation
 
-```bash
-cp .env.example .env
-```
-
-Key configuration options:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | - |
-| `OPENAI_API_KEY` | LLM API key | - |
-| `OPENAI_BASE_URL` | LLM API endpoint | `https://api.openai.com/v1` |
-| `OPENAI_MODEL` | Default model | `gpt-4o` |
-| `AVAILABLE_MODELS` | Available models (comma-separated) | `Qwen3.7-Max` |
-| `MAX_CONTEXT_TOKENS` | Context window size | `4000` |
-| `OLLAMA_BASE_URL` | Ollama API endpoint | `http://localhost:11434/v1` |
-| `EMBEDDING_BASE_URL` | Embedding service API endpoint (defaults to `OLLAMA_BASE_URL`) | `http://localhost:11434/v1` |
-| `EMBEDDING_API_KEY` | Embedding service API key (`ollama` for Ollama, real key for third-party) | `ollama` |
-| `EMBEDDING_MODEL` | Embedding model name | `qwen3-embedding:8b` |
-| `EMBEDDING_DIM` | Embedding vector dimension | `4096` |
-| `CHUNK_SIZE` | Document chunk size (characters) | `500` |
-| `CHUNK_OVERLAP` | Chunk overlap size | `50` |
-| `RAG_TOP_K` | Number of chunks to retrieve | `5` |
-| `RAG_HYBRID_ENABLED` | Enable BM25 + vector hybrid search | `true` |
-| `RAG_BM25_WEIGHT` | BM25 weight in hybrid search | `0.3` |
-| `RAG_VECTOR_WEIGHT` | Vector weight in hybrid search | `0.7` |
-| `RAG_QUERY_REWRITE_ENABLED` | Enable multi-query rewriting | `false` |
-| `RAG_RERANK_ENABLED` | Enable result reranking | `false` |
-| `WEB_SEARCH_ENABLED` | Enable web search tool | `false` |
-| `WEB_SEARCH_PROVIDER` | Web search provider (tavily / bing / duckduckgo) | `duckduckgo` |
-| `TAVILY_API_KEY` | Tavily API key (optional, most stable) | empty |
-| `CODE_EXEC_ENABLED` | Enable code execution tool | `true` |
-| `KNOWLEDGE_SEARCH_ENABLED` | Enable knowledge base search tool (toggleable in UI) | `false` |
-| `API_KEY` | API authentication key (empty = skip auth) | empty |
-| `INPUT_FILTER_ENABLED` | Enable Prompt Injection input filtering | `true` |
-| `RATELIMIT_STORAGE_URL` | Rate limit storage backend (`memory://` or `redis://host:port`) | `memory://` |
-| `CACHE_ENABLED` | Enable response caching | `true` |
-| `CACHE_TTL_HOURS` | Cache TTL (hours) | `1` |
-| `MAX_RETRIES` | Maximum retry count | `3` |
-| `FALLBACK_MODEL` | Fallback model (used when primary fails) | empty |
-| `VERIFY_ENABLED` | Enable result verification | `false` |
-| `VERIFY_MODEL` | Model used by the verification agent (empty = same as main) | empty |
-| `AI_DISCLAIMER_TEXT` | AI disclaimer text (empty = no disclaimer) | empty |
-| `LANGCHAIN_TRACING_V2` | Enable LangSmith tracing | `false` |
-| `LANGCHAIN_PROJECT` | LangSmith project name | `flask_chat` |
-| `LANGCHAIN_API_KEY` | LangSmith API key | - |
-| `LANGCHAIN_ENDPOINT` | LangSmith endpoint | `https://api.smith.langchain.com` |
-| **Code Index Config** | | |
-| `CODE_INDEX_ENABLED` | Enable code index feature | `false` |
-| `CODE_INDEX_DB_HOST` | Code index database host | `localhost` |
-| `CODE_INDEX_DB_PORT` | Code index database port | `5432` |
-| `CODE_INDEX_DB_USER` | Code index database user | `postgres` |
-| `CODE_INDEX_DB_PASSWORD` | Code index database password | - |
-| `CODE_INDEX_DB_NAME` | Code index database name | `flask_chat` |
-| `CODE_INDEX_DEFAULT_REPO` | Default code repository name (preferred during search) | `flask_chat` |
-| `CODE_INDEX_TOP_K` | Number of results to return | `8` |
-| **Index Builder Config** | | |
-| `CODE_INDEX_CHUNK_LINES` | Code chunk line count | `100` |
-| `CODE_INDEX_CHUNK_LINES_OVERLAP` | Code chunk overlap lines | `10` |
-| `CODE_INDEX_MAX_CHARS` | Code chunk max characters | `1500` |
-| `CODE_INDEX_SUPPORTED_EXTS` | Supported file extensions for indexing | `.py,.js,.ts,.tsx,...` |
-| `CODE_INDEX_EXCLUDE_PATTERNS` | Excluded directory/file name patterns | `.git,__pycache__,...` |
-
-**5. Database initialization**
-
-`db.create_all()` creates all tables automatically on first run — no manual table creation needed.
-
-**6. Database migration**
-
-When `models.py` changes (new fields, new tables, etc.), existing databases are not updated automatically — you must run migration scripts manually. This project uses **hand-written SQL scripts** for migrations (stored in the `migrations/` directory, named by date, e.g., `2026-09-11_add_xxx.sql`).
-
-**Running existing migration scripts:**
-
-```bash
-psql -U <username> -d flask_chat -f migrations/2026-09-11_add_advanced_features.sql
-psql -U <username> -d flask_chat -f migrations/2026-09-11_add_memory_fields.sql
-psql -U <username> -d flask_chat -f migrations/2026-09-11_add_feedback_field.sql
-psql -U <username> -d flask_chat -f migrations/2026-09-17_add_code_repositories.sql
-psql -U <username> -d flask_chat -f migrations/2026-09-17_add_progress_fields.sql
-psql -U <username> -d flask_chat -f migrations/2026-09-18_incremental_index.sql
-```
-
-**Convention for adding a new migration:**
-
-1. Modify `app/models.py` to add the new field or table
-2. Create a new script in `migrations/` named `YYYY-MM-DD_description.sql`
-3. Use `IF NOT EXISTS` in the script so it is safe to re-run, for example:
-
-```sql
-ALTER TABLE messages ADD COLUMN IF NOT EXISTS new_field VARCHAR(100) DEFAULT NULL;
-```
-
-4. Run new scripts in date order. It's recommended to add a comment at the top of each script describing the change.
-
-**7. Run the application**
-
-```bash
-python run.py
-```
-
-Open `http://localhost:8080` in your browser.
-
-For production, use Gunicorn:
-
-```bash
-gunicorn run:app -w 4 -b 0.0.0.0:8080
-```
-
-### Using Ollama as Local LLM
-
-This project uses the OpenAI SDK to call LLMs, and Ollama natively provides an OpenAI-compatible API, so **no code changes are needed** — just adjust the `.env` configuration to switch to local models.
-
-**Steps:**
-
-1. Pull a model that supports tool calling (Function Calling) in Ollama:
-
-```bash
-# Recommended: best for Chinese
-ollama pull qwen2.5:7b
-
-# Alternatives: better for English
-ollama pull llama3.1:8b
-ollama pull mistral:7b
-
-# Low VRAM (8GB)
-ollama pull qwen2.5:3b
-```
-
-> ⚠️ **Note:** You must pull a model that supports tool calling (e.g., `qwen2.5`, `llama3.1`, `mistral`, `command-r`). Older models like `llama2:7b` or `qwen:7b` do not support it and will return 400 errors.
-
-2. Update the LLM configuration in `.env`:
-
-```bash
-# Point the LLM to local Ollama
-OPENAI_BASE_URL=http://localhost:11434/v1
-OPENAI_API_KEY=ollama                # Ollama doesn't verify keys, but the SDK requires a non-empty value
-OPENAI_MODEL=qwen2.5:7b              # Default model (must include tag like :7b)
-AVAILABLE_MODELS=qwen2.5:7b,qwen2.5:14b,llama3.1:8b
-```
-
-3. (Optional) Disable external services for fully offline operation:
-
-```bash
-LANGCHAIN_TRACING_V2=false           # Disable LangSmith reporting
-```
-
-4. Restart the Flask application:
-
-```bash
-python run.py
-```
-
-**Common issues:**
-
-- **First request is slow**: Ollama loads the model into VRAM/RAM on first use (10–30 seconds). Subsequent requests are normal. You can warm up with `ollama run <model> "hi"`.
-- **Model tags must be exact**: `AVAILABLE_MODELS` requires full tags (e.g., `qwen2.5:7b`), not just `qwen2.5`.
-- **Switching embedding models**: If you change the embedding model (e.g., from `qwen3-embedding:8b` to `nomic-embed-text`), you must update `EMBEDDING_DIM` accordingly (4096 → 768) and rebuild the `document_chunks` table.
-- **Hybrid mode**: You can configure both cloud LLMs (e.g., OpenAI) and local Ollama models together — list multiple models in `AVAILABLE_MODELS` and switch freely from the frontend dropdown.
-
-### Using a Third-Party Embedding Service
-
-Embedding and LLM are independent and can be configured separately. To use a third-party embedding service (instead of Ollama), just adjust `.env`:
-
-```bash
-EMBEDDING_BASE_URL=https://api.example.com/v1   # Third-party embedding endpoint
-EMBEDDING_API_KEY=your-real-api-key             # Third-party API key
-EMBEDDING_MODEL=text-embedding-3-large          # Third-party model name
-EMBEDDING_DIM=3072                              # Matching vector dimension
-```
-
-RAG functionality (document parsing, chunking, embedding, hybrid search) does not depend on the LLM, so the knowledge base keeps working after switching to a third-party embedding provider. Just make sure `EMBEDDING_DIM` matches the actual output dimension of the chosen model.
-
-### Code Index Management
-
-The code index management feature allows users to configure local code repositories via the Web UI and build vector indexes. The AI automatically retrieves relevant code snippets during conversation through the `search_code` tool.
-
-**Page access:**
-
-- **Main page** (`/`): Sidebar shows knowledge base and code repository count badges with navigation links
-- **Code repos page** (`/code-repos`): Standalone code repository management page
-- **Knowledge page** (`/knowledge`): Standalone knowledge base management page
-
-**Supported features:**
-
-- Add/delete code repository configurations (repository name + local path)
-- Full index build (clear and rebuild)
-- Incremental index build (hybrid approach: file mtime pre-filtering + SHA256 hash verification, only indexes new/modified files, automatically cleans up deleted file indexes)
-- Real-time progress bar during indexing (polls every 3 seconds)
-- Cancel ongoing index tasks
-- Search testing
-- Automatic sensitive content filtering (API keys, passwords, tokens, etc.)
-
-**Indexing principles:**
-
-- Uses LlamaIndex's `CodeSplitter` (based on tree-sitter) for syntax-aware code splitting
-- Uses `OllamaEmbedding` (qwen3-embedding:8b, 4096 dimensions) to generate code vectors
-- Stored in PostgreSQL `data_code_embeddings_{repo_name}` table (PGVectorStore auto-adds `data_` prefix)
-- During incremental indexing, the `indexed_files` table records each file's path and hash, compares changes, and only processes differential files
-
-**Repository selection logic during search:**
-
-- Repository name specified: Validates whether the repository has been indexed first; returns empty results if not indexed
-- No repository name specified: Automatically finds the list of indexed repositories, prioritizes the default repository from config (`CODE_INDEX_DEFAULT_REPO`), otherwise uses the first indexed repository
-
-### Usage
-
-- **Chat** — Type a message in the input box, press Enter to send, Shift+Enter for new line
-- **New Conversation** — Click "+ New Chat" to open a title dialog; enter a name or leave blank for the default (an AI-generated title is applied after the first message)
-- **Rename Conversation** — Hover over a conversation in the sidebar and click the edit button (✎) to rename it inline (Enter or click away to save, Esc to cancel)
-- **Switch Models** — Select a different LLM from the dropdown at the top
-- **Interrupt** — Click the "Interrupt" button during AI generation to stop it
-- **Knowledge Base** — Click "Knowledge Base" in the sidebar to enter the standalone management page. Supports document upload (`.txt`, `.md`, `.pdf`, `.docx`), deletion, and statistics
-- **Code Repositories** — Click "Code Repositories" in the sidebar to enter the standalone management page. Supports adding repositories, full/incremental index building, progress tracking, task cancellation, search testing, and deletion
-- **Result Verification** — Toggle the "Result Verification" switch in the header to auto-verify every AI answer. You can also click the "🔍 Verify" button on any message for manual on-demand verification. Results are shown as a card with pass/fail, confidence, and issues
-- **Share Conversation** — Click the "Share" button to generate a public link viewable via `/share/<token>` (read-only)
-- **Export Conversation** — Click the "Export" button and choose Markdown / JSON / TXT format to download
-- **Feedback** — Click 👍 / 👎 below a message to rate the answer
-- **Debug Panel** — Click the 🐛 button in the bottom-right corner to view system status, cache status, available models, and token statistics
-- **LangSmith Monitoring** — After launching, visit [LangSmith](https://smith.langchain.com) to inspect end-to-end traces for LLM calls, RAG retrieval, and context building
-
-### API Endpoints
-
-#### Chat & Management
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | Main page |
-| `GET` | `/knowledge` | Knowledge base management page |
-| `GET` | `/code-repos` | Code repository management page |
-| `GET` | `/api/models` | List available models |
-| `POST` | `/api/conversations` | Create a new conversation (optional body `{"title": "..."}`) |
-| `PATCH` | `/api/conversations/<id>` | Rename a conversation (body `{"title": "..."}`) |
-| `GET` | `/api/conversations/<id>/messages` | Get messages (with `tool_calls`, `token_count`, etc.) |
-| `POST` | `/api/conversations/<id>/chat` | Send message and stream response (SSE) |
-| `POST` | `/api/conversations/<id>/interrupt` | Interrupt active generation |
-| `DELETE` | `/api/conversations/<id>` | Delete a conversation |
-| `GET` | `/api/conversations/<id>/stats` | Get conversation token statistics |
-
-#### Result Verification
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/config/verify` | Get result verification configuration |
-| `POST` | `/api/config/verify` | Toggle result verification (`{"enabled": true/false}`) |
-| `POST` | `/api/conversations/<id>/messages/<mid>/verify` | Manually trigger verification for a message |
-
-#### Tool Configuration
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/config/tools` | Get tool toggle status (knowledge search, code index) |
-| `POST` | `/api/config/tools` | Update tool toggles (`{"knowledge_search": true/false, "code_index": true/false}`) |
-
-#### Sharing & Export
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/conversations/<id>/share` | Generate share link (returns `share_token`) |
-| `GET` | `/share/<token>` | View a shared conversation (public read-only page) |
-| `GET` | `/api/conversations/<id>/export` | Export conversation (`?format=markdown/json/txt`) |
-
-#### Knowledge Base (RAG)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/documents/upload` | Upload a document to the knowledge base |
-| `GET` | `/api/documents` | List knowledge base documents |
-| `DELETE` | `/api/documents/<id>` | Delete a knowledge base document |
-| `POST` | `/api/documents/search` | Search the knowledge base |
-
-#### Code Index Management
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/code-repos` | List all code repositories |
-| `POST` | `/api/code-repos` | Create repository config (`{"name": "...", "path": "..."}`) |
-| `GET` | `/api/code-repos/<id>` | Get single repository config |
-| `DELETE` | `/api/code-repos/<id>` | Delete repository config and its index |
-| `POST` | `/api/code-repos/<id>/index` | Trigger index build (async, `{"mode": "full"/"incremental", "reindex": true}`) |
-| `GET` | `/api/code-repos/<id>/progress` | Get index build progress |
-| `POST` | `/api/code-repos/<id>/cancel` | Cancel ongoing index task |
-| `GET` | `/api/code-repos/<id>/status` | Get repository index status |
-| `GET` | `/api/code-repos/<id>/stats` | Get index statistics |
-
-#### Image Upload & Feedback
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/upload/image` | Upload an image (multimodal) |
-| `POST` | `/api/messages/<msg_id>/feedback` | Submit message feedback (`{"feedback": "like"/"dislike"}`) |
-
-#### System & Operations
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/health` | Health check (database/cache status) |
-| `POST` | `/api/cache/clear` | Clear response cache |
-| `GET` | `/api/audit-logs` | Get audit logs |
-| `GET` | `/api/config/disclaimer` | Get disclaimer configuration |
-| `POST` | `/api/config/disclaimer` | Update disclaimer configuration |
-
-#### Chat SSE Event Types
-
-`/api/conversations/<id>/chat` emits the following event types over SSE:
-
-| Event Field | Description |
-|-------------|-------------|
-| `token` | Incremental text fragment |
-| `tool_calls` | Tool call records (tool name, arguments, result) |
-| `done` | Response complete, with `content`, `message_id`, `token_count` |
-| `verifying` | Verification started (when verify toggle is on) |
-| `verified` | Verification complete, with `is_correct`, `confidence`, `explanation`, `issues` |
-| `error` | Error message |
+See `docs/api.md` for complete API documentation.

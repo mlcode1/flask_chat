@@ -3,16 +3,13 @@
 """
 import json
 import re
-import logging
-import threading
 import uuid
-import os
 import io
 import base64
+import logging
 from datetime import datetime
 from flask import (
-    Blueprint, render_template, request, jsonify, Response,
-    stream_with_context, current_app, send_file
+    Blueprint, render_template, request, jsonify, current_app, send_file
 )
 from app.extensions import db
 from app.models import Conversation, Message, SharedConversation
@@ -24,13 +21,12 @@ from app.services.security_service import (
 )
 from app.middleware import get_disclaimer
 from app.services.cache_service import cache_service, hash_context
+from app.errors import BadRequestError, NotFoundError
 
 
 logger = logging.getLogger(__name__)
 
 chat_bp = Blueprint("chat", __name__)
-
-_interrupt_events = {}
 
 
 # ============================================================
@@ -117,7 +113,7 @@ def update_disclaimer_config():
     data = request.get_json() or {}
     text = data.get("text", "")
     if not isinstance(text, str):
-        return jsonify({"error": "text 必须是字符串"}), 400
+        raise BadRequestError("text 必须是字符串")
     decoded = text.strip()
     current_app.config["AI_DISCLAIMER_TEXT"] = decoded
     return jsonify({"text": decoded})
@@ -181,19 +177,47 @@ def create_conversation():
 @chat_bp.route("/api/conversations/<int:cid>/messages")
 @require_api_key
 def get_messages(cid):
-    messages = Message.query.filter_by(conversation_id=cid).order_by(Message.created_at).all()
-    return jsonify([{
-        "id": m.id,
-        "role": m.role,
-        "content": m.content,
-        "interrupted": m.interrupted,
-        "verification": m.verification,
-        "image_urls": m.image_urls or [],
-        "token_count": m.token_count or 0,
-        "tool_calls": m.tool_calls or [],
-        "status": m.status or "completed",
-        "created_at": m.created_at.isoformat(),
-    } for m in messages])
+    # 分页参数
+    limit = request.args.get("limit", 50, type=int)
+    limit = min(max(limit, 1), 100)  # 限制范围 1-100
+    
+    # 游标分页：cursor 是消息 ID，返回该 ID 之前的消息
+    cursor = request.args.get("cursor", type=int)
+    
+    query = Message.query.filter_by(conversation_id=cid)
+    
+    # 如果有游标，查询该 ID 之前的消息
+    if cursor:
+        query = query.filter(Message.id < cursor)
+    
+    # 按 ID 降序获取最新的 limit 条消息
+    messages = query.order_by(Message.id.desc()).limit(limit).all()
+    
+    # 反转为正序（从旧到新）
+    messages = list(reversed(messages))
+    
+    # 判断是否还有更多消息
+    has_more = False
+    if messages:
+        oldest_id = messages[0].id
+        has_more = Message.query.filter_by(conversation_id=cid).filter(Message.id < oldest_id).first() is not None
+    
+    return jsonify({
+        "messages": [{
+            "id": m.id,
+            "role": m.role,
+            "content": m.content,
+            "interrupted": m.interrupted,
+            "verification": m.verification,
+            "image_urls": m.image_urls or [],
+            "token_count": m.token_count or 0,
+            "tool_calls": m.tool_calls or [],
+            "status": m.status or "completed",
+            "created_at": m.created_at.isoformat(),
+        } for m in messages],
+        "has_more": has_more,
+        "oldest_id": messages[0].id if messages else None
+    })
 
 
 @chat_bp.route("/api/conversations/<int:cid>", methods=["DELETE"])
@@ -216,10 +240,10 @@ def rename_conversation(cid):
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
     if not title:
-        return jsonify({"error": "标题不能为空"}), 400
+        raise BadRequestError("标题不能为空")
     conv = db.session.get(Conversation, cid)
     if not conv:
-        return jsonify({"error": "对话不存在"}), 404
+        raise NotFoundError("对话不存在")
     conv.title = title[:50]
     db.session.commit()
     log_audit("rename_conversation", conversation_id=cid, detail=title)
@@ -255,21 +279,21 @@ def _auto_title(conv_id, first_message):
 def upload_image():
     """上传图片，返回 base64 data URL"""
     if "file" not in request.files:
-        return jsonify({"error": "未选择文件"}), 400
+        raise BadRequestError("未选择文件")
 
     file = request.files["file"]
     if file.filename == "":
-        return jsonify({"error": "未选择文件"}), 400
+        raise BadRequestError("未选择文件")
 
     allowed_ext = {"png", "jpg", "jpeg", "gif", "webp"}
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if ext not in allowed_ext:
-        return jsonify({"error": f"不支持的图片格式，支持: {', '.join(allowed_ext)}"}), 400
+        raise BadRequestError(f"不支持的图片格式，支持: {', '.join(allowed_ext)}")
 
     # 读取并转 base64
     data = file.read()
     if len(data) > 10 * 1024 * 1024:  # 10MB limit
-        return jsonify({"error": "图片大小超过 10MB 限制"}), 400
+        raise BadRequestError("图片大小超过 10MB 限制")
 
     b64 = base64.b64encode(data).decode("utf-8")
     mime = f"image/{ext}" if ext != "jpg" else "image/jpeg"
@@ -279,252 +303,8 @@ def upload_image():
 
 
 # ============================================================
-# 聊天主流程
+# 消息验证
 # ============================================================
-
-@chat_bp.route("/api/conversations/<int:cid>/chat", methods=["POST"])
-@require_api_key
-def chat(cid):
-    data = request.get_json() or {}
-    user_content = data.get("content", "").strip()
-    model = data.get("model", "").strip() or current_app.config["OPENAI_MODEL"]
-    image_urls = data.get("image_urls", [])
-
-    if not user_content and not image_urls:
-        return jsonify({"error": "消息不能为空"}), 400
-
-    # 输入过滤
-    is_safe, filtered_text, warning = filter_input(user_content)
-    if not is_safe:
-        user_msg = Message(conversation_id=cid, role="user", content=user_content, image_urls=image_urls or [])
-        db.session.add(user_msg)
-        db.session.commit()
-
-        assistant_msg = Message(
-            conversation_id=cid, role="assistant",
-            content=f"⚠️ {warning}\n\n为了安全起见，我无法处理包含潜在注入指令的输入。请重新描述你的问题。",
-        )
-        db.session.add(assistant_msg)
-        db.session.commit()
-        log_audit("input_filtered", conversation_id=cid, detail=user_content[:200])
-        return jsonify({"error": warning, "message_id": assistant_msg.id}), 400
-
-    # 创建用户消息
-    user_msg = Message(
-        conversation_id=cid, role="user",
-        content=user_content, image_urls=image_urls or [],
-    )
-    db.session.add(user_msg)
-    db.session.commit()
-
-    # 统计用户消息 token
-    ai_svc = AIService(model=model)
-    user_msg.token_count = ai_svc.estimate_tokens(user_content)
-    if image_urls:
-        user_msg.token_count += len(image_urls) * 85  # 图片约 85 tokens each
-    db.session.commit()
-
-    # 自动生成标题（第一条消息）
-    msg_count = Message.query.filter_by(conversation_id=cid, role="user").count()
-    if msg_count == 1:
-        _auto_title(cid, user_content)
-
-    # 上下文压缩
-    ctx = ContextService(current_app.config["MAX_CONTEXT_TOKENS"])
-    if ctx.should_compress(cid):
-        ctx.compress_context(cid, ai_svc)
-
-    messages = ctx.build_context(cid)
-
-    # 响应缓存：检查是否有缓存结果
-    cache_enabled = current_app.config.get("CACHE_ENABLED", False)
-    context_hash = hash_context(messages) if cache_enabled else None
-    cached_response = cache_service.get(user_content, context_hash) if cache_enabled else None
-
-    stop_event = threading.Event()
-    _interrupt_events[cid] = stop_event
-
-    assistant_msg = Message(conversation_id=cid, role="assistant", content="")
-    db.session.add(assistant_msg)
-    db.session.commit()
-    msg_id = assistant_msg.id
-
-    log_audit("chat", conversation_id=cid, detail=f"model={model}")
-
-    def generate():
-        full = ""
-        last_save_len = 0  # 上次保存时的内容长度
-        tool_calls_log = []  # 提前初始化，避免 finally 块引用时报 NameError
-
-        # 缓存命中：直接返回缓存结果
-        if cached_response:
-            try:
-                yield f"data: {json.dumps({'token': cached_response}, ensure_ascii=False)}\n\n"
-                msg = db.session.get(Message, msg_id)
-                msg.content = cached_response
-                msg.token_count = ai_svc.estimate_tokens(cached_response)
-                db.session.commit()
-                conv = db.session.get(Conversation, cid)
-                conv.updated_at = db.func.now()
-                db.session.commit()
-                yield f"data: {json.dumps({'done': True, 'content': cached_response, 'message_id': msg_id, 'token_count': msg.token_count, 'cached': True}, ensure_ascii=False)}\n\n"
-                return
-            except Exception as e:
-                logger.warning(f"Cache response failed: {e}")
-                return
-
-        try:
-            ai = AIService(model=model)
-
-            def on_chunk(text):
-                nonlocal full, last_save_len
-                full += text
-                # 实时保存：每收到 save_interval 字符保存一次，防止断开丢失
-                # 增加到2000字符，减少数据库操作频率
-                if len(full) - last_save_len >= 2000:
-                    try:
-                        msg = db.session.get(Message, msg_id)
-                        if msg:
-                            msg.content = full
-                            db.session.commit()
-                            last_save_len = len(full)
-                    except Exception:
-                        pass
-
-            def on_tool_call(tc, result):
-                """工具调用时通过 SSE 发送事件"""
-                nonlocal tool_calls_log
-                # 保存为 OpenAI 标准格式（带 _result 用于前端展示）
-                tool_info = {
-                    "id": tc.get("id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": tc["function"]["name"],
-                        "arguments": tc["function"]["arguments"],
-                    },
-                    "_result": result[:500] if result else "",
-                }
-                tool_calls_log.append(tool_info)
-
-            def on_confirm_request(confirm_data):
-                """危险工具确认请求"""
-                nonlocal pending_confirmation
-                pending_confirmation = confirm_data
-                # 通过 SSE 发送确认请求给前端
-                yield f"data: {json.dumps({'confirm_required': confirm_data}, ensure_ascii=False)}\n\n"
-
-            pending_confirmation = None
-
-            for token in ai.stream_response(
-                messages, 
-                on_chunk=on_chunk, 
-                on_tool_call=on_tool_call, 
-                stop_event=stop_event,
-                on_confirm_request=on_confirm_request,
-                conversation_id=cid
-            ):
-                if stop_event.is_set():
-                    break
-                yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
-
-            # 发送工具调用信息（如果有的话）
-            if tool_calls_log:
-                yield f"data: {json.dumps({'tool_calls': tool_calls_log}, ensure_ascii=False)}\n\n"
-
-            # Disclaimer 处理
-            disclaimer = get_disclaimer()
-            if not disclaimer:
-                # 未配置免责声明，直接返回 AI 结果
-                final_content = full
-            elif disclaimer.strip() in full or os.getenv("AI_DISCLAIMER_TEXT", "").strip() in full:
-                # AI 已自带免责声明，避免重复
-                final_content = full
-            else:
-                final_content = full + disclaimer
-            
-            # 更新 full 变量，供 finally 块保存使用
-            full = final_content
-
-            # 写入缓存（仅在无工具调用时缓存）
-            if cache_enabled and not tool_calls_log and not stop_event.is_set():
-                try:
-                    cache_service.set(user_content, final_content, context_hash, ttl_hours=1)
-                except Exception as e:
-                    logger.warning(f"Cache write failed: {e}")
-
-            # 发送完成事件给前端
-            token_count = ai.estimate_tokens(final_content) if ai else 0
-            yield f"data: {json.dumps({'done': True, 'content': final_content, 'message_id': msg_id, 'token_count': token_count}, ensure_ascii=False)}\n\n"
-
-            # 结果验证
-            if current_app.config["VERIFY_ENABLED"] and not stop_event.is_set():
-                yield f"data: {json.dumps({'verifying': True}, ensure_ascii=False)}\n\n"
-                try:
-                    verifier = VerifierService()
-                    verify_result = verifier.verify_answer(
-                        question=user_content,
-                        answer=final_content,
-                    )
-                    if verify_result.get("status") != "skipped":
-                        msg = db.session.get(Message, msg_id)
-                        msg.verification = verify_result
-                        db.session.commit()
-                    yield f"data: {json.dumps({'verified': verify_result}, ensure_ascii=False)}\n\n"
-                except Exception as verify_err:
-                    logger.warning("自动验证异常: %s", verify_err)
-                    yield f"data: {json.dumps({'verified': {'status': 'skipped'}}, ensure_ascii=False)}\n\n"
-
-        except Exception as e:
-            logger.error("聊天流异常: %s", e)
-            # 发送错误事件给前端
-            try:
-                yield f"data: {json.dumps({'error': '回复异常，请重试'}, ensure_ascii=False)}\n\n"
-            except GeneratorExit:
-                pass
-        finally:
-            _interrupt_events.pop(cid, None)
-            # 统一保存消息：无论正常结束、异常、还是客户端断开，都保存已有内容
-            # 使用独立的事务确保保存成功
-            try:
-                db.session.rollback()  # 先回滚任何未完成的事务
-                msg = db.session.get(Message, msg_id)
-                if msg:
-                    if full.strip():
-                        # 有内容，保存
-                        msg.content = full
-                        msg.token_count = ai.estimate_tokens(full) if ai else 0
-                        msg.tool_calls = tool_calls_log if tool_calls_log else []
-                        if stop_event.is_set():
-                            msg.interrupted = True
-                        db.session.commit()
-                        # 更新对话时间
-                        conv = db.session.get(Conversation, cid)
-                        if conv:
-                            conv.updated_at = db.func.now()
-                            db.session.commit()
-                    else:
-                        # 完全没有内容，删除这条空消息，避免污染上下文
-                        db.session.delete(msg)
-                        db.session.commit()
-            except Exception as save_err:
-                logger.warning("保存消息失败: %s", save_err)
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-    )
-
-
-@chat_bp.route("/api/conversations/<int:cid>/interrupt", methods=["POST"])
-@require_api_key
-def interrupt(cid):
-    event = _interrupt_events.get(cid)
-    if event:
-        event.set()
-        return jsonify({"status": "interrupted"})
-    return jsonify({"status": "no_active_stream"}), 404
-
 
 @chat_bp.route("/api/conversations/<int:cid>/messages/<int:mid>/verify", methods=["POST"])
 @require_api_key
@@ -534,9 +314,9 @@ def verify_message(cid, mid):
 
     msg = db.session.get(Message, mid)
     if not msg or msg.conversation_id != cid:
-        return jsonify({"error": "消息不存在"}), 404
+        raise NotFoundError("消息不存在")
     if msg.role != "assistant":
-        return jsonify({"error": "只能验证助手消息"}), 400
+        raise BadRequestError("只能验证助手消息")
 
     prev_msg = Message.query.filter_by(
         conversation_id=cid, role="user"
@@ -587,7 +367,7 @@ def share_conversation(cid):
     """生成分享链接"""
     conv = db.session.get(Conversation, cid)
     if not conv:
-        return jsonify({"error": "对话不存在"}), 404
+        raise NotFoundError("对话不存在")
 
     # 检查是否已有分享记录
     existing = SharedConversation.query.filter_by(conversation_id=cid).first()
@@ -624,7 +404,7 @@ def export_conversation(cid):
     """导出对话为 Markdown / JSON / TXT"""
     conv = db.session.get(Conversation, cid)
     if not conv:
-        return jsonify({"error": "对话不存在"}), 404
+        raise NotFoundError("对话不存在")
 
     fmt = request.args.get("format", "markdown")
     messages = Message.query.filter_by(conversation_id=cid).order_by(Message.created_at).all()
@@ -705,7 +485,7 @@ def submit_feedback(msg_id):
     feedback = data.get("feedback")
     
     if feedback not in ["like", "dislike"]:
-        return jsonify({"error": "反馈类型必须是 like 或 dislike"}), 400
+        raise BadRequestError("反馈类型必须是 like 或 dislike")
     
     msg.feedback = feedback
     db.session.commit()

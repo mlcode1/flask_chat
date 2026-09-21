@@ -8,6 +8,7 @@ from openai import OpenAI
 from flask import current_app
 from langsmith import traceable
 from app.services.tool_service import get_tools, execute_tool, is_dangerous_tool, get_dangerous_tool_reason
+from app.utils import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -229,8 +230,4 @@ class AIService:
 
     def estimate_tokens(self, text):
         """粗略估算 token 数"""
-        if not text:
-            return 0
-        chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-        other_chars = len(text) - chinese_chars
-        return int(chinese_chars * 1.5 + other_chars * 0.25)
+        return estimate_tokens(text)

@@ -183,6 +183,6 @@
     <script src="{{ url_for('static', filename='js/socket.io.min.js') }}"></script>
     <!-- Marked.js 用于 Markdown 渲染（本地版本，避免 CDN 加载失败） -->
     <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+    <script type="module" src="{{ url_for('static', filename='js/chat.js') }}"></script>
 </body>
 </html>

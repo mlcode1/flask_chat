@@ -12,6 +12,10 @@ from app.models import CodeRepository, IndexedFile, Message  # 导入新模型
 from app.routes.chat import chat_bp
 from app.routes.rag import rag_bp
 from app.routes.code_index import code_index_bp
+from app.errors import register_error_handlers
+from app.services.cache_service import init_cache_service
+from app.logging_config import setup_logging, log_request_start, log_request_end
+from app import monitoring
 
 # 全局 SocketIO 实例
 socketio = SocketIO()
@@ -23,10 +27,28 @@ def create_app():
 
     CORS(app)
     db.init_app(app)
+    
+    # 初始化结构化日志
+    setup_logging(app)
+    
+    # Register global error handlers
+    register_error_handlers(app)
 
     app.register_blueprint(chat_bp)
     app.register_blueprint(rag_bp)
     app.register_blueprint(code_index_bp)
+    
+    # 注册请求追踪钩子
+    @app.before_request
+    def before_request():
+        log_request_start()
+    
+    @app.after_request
+    def after_request(response):
+        return log_request_end(response)
+
+    # 初始化性能监控
+    monitoring.init_app(app)
 
     with app.app_context():
         db.session.execute(db.text("CREATE EXTENSION IF NOT EXISTS vector"))
@@ -76,6 +98,9 @@ def create_app():
         except Exception as e:
             print(f"⚠️ 清理残留消息状态失败: {e}")
             db.session.rollback()
+
+        # 初始化缓存服务
+        init_cache_service()
 
     # 初始化 SocketIO
     socketio.init_app(

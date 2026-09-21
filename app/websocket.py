@@ -14,12 +14,8 @@ from app.services.cache_service import cache_service
 from app.services.security_service import filter_input
 from app.services.verifier_service import VerifierService
 from app.middleware import get_disclaimer
-from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
-
-# 线程池：限制同时生成的并发数，防止线程数无限增长
-_generation_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ai-gen")
 
 # 全局存储正在进行的生成任务
 _active_generations = {}  # {message_id: {thread, content, stop_event, status}}
@@ -158,17 +154,19 @@ def register_handlers(socketio, app):
                 'status': 'generating'
             })
 
-            # 启动后台生成线程（使用线程池，限制最大并发数为 8）
+            # 启动后台生成线程
             room = f"conv_{conv_id}"
             stop_event = threading.Event()
-            future = _generation_pool.submit(
-                generate_ai_response,
-                app, int(conv_id), msg_id, content, model, image_urls, room, stop_event
+            thread = threading.Thread(
+                target=generate_ai_response,
+                args=(app, int(conv_id), msg_id, content, model, image_urls, room, stop_event)
             )
+            thread.daemon = True
+            thread.start()
 
             # 记录生成任务
             _active_generations[msg_id] = {
-                'future': future,
+                'thread': thread,
                 'content': '',
                 'stop_event': stop_event,
                 'status': 'generating'

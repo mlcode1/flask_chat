@@ -12,7 +12,7 @@ from flask import current_app
 from langsmith import traceable
 from app.extensions import db
 from app.models import Document, DocumentChunk
-from app.services.cache_service import cache_service
+from app.services import cache_service as cache_service_module
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,24 @@ def get_embeddings(texts):
 # BM25 混合检索
 # ============================================================
 
+# BM25 索引缓存（内存缓存，文档变更时自动失效）
+_bm25_cache = {
+    'index': None,
+    'doc_tokens': None,
+    'chunk_ids': None,
+    'version': 0
+}
+
+def _get_document_version():
+    """获取文档版本（基于最新文档的 updated_at）"""
+    try:
+        latest_doc = Document.query.order_by(Document.created_at.desc()).first()
+        if latest_doc:
+            return int(latest_doc.created_at.timestamp())
+    except Exception:
+        pass
+    return 0
+
 def _tokenize(text):
     """简单的中英文分词"""
     if not text:
@@ -133,6 +151,29 @@ def _build_bm25_index(chunks_with_content):
         "df": dict(df), "doc_tokens": doc_tokens,
         "doc_lens": [len(dt) for dt in doc_tokens],
     }, doc_tokens
+
+
+def _get_bm25_index_cached(chunks_data):
+    """获取缓存的 BM25 索引，如果缓存失效则重建"""
+    global _bm25_cache
+    
+    # 检查缓存是否有效
+    current_version = _get_document_version()
+    current_chunk_ids = tuple(sorted([(c['document_id'], c['chunk_index']) for c in chunks_data]))
+    
+    if (_bm25_cache['index'] is not None and 
+        _bm25_cache['version'] == current_version and
+        _bm25_cache['chunk_ids'] == current_chunk_ids):
+        return _bm25_cache['index'], _bm25_cache['doc_tokens']
+    
+    # 缓存失效，重建索引
+    index, doc_tokens = _build_bm25_index(chunks_data)
+    _bm25_cache['index'] = index
+    _bm25_cache['doc_tokens'] = doc_tokens
+    _bm25_cache['chunk_ids'] = current_chunk_ids
+    _bm25_cache['version'] = current_version
+    
+    return index, doc_tokens
 
 
 def _bm25_score(query_tokens, doc_idx, index):
@@ -219,7 +260,7 @@ def _hybrid_search(query, top_k=None):
     # 3. 提取真实的向量相似度分数
     vector_scores = [max(0, 1.0 - float(distance)) for _, _, distance in vector_results]
     
-    # 4. BM25 检索
+    # 4. BM25 检索（使用缓存优化）
     chunks_data = [
         {
             "content": chunk.content,
@@ -231,7 +272,8 @@ def _hybrid_search(query, top_k=None):
         for i, (chunk, filename, _) in enumerate(vector_results)
     ]
 
-    index, _ = _build_bm25_index(chunks_data)
+    # 使用缓存的 BM25 索引，避免每次查询都重建
+    index, _ = _get_bm25_index_cached(chunks_data)
     query_tokens = _tokenize(query)
 
     # 5. 计算 BM25 分数
@@ -412,7 +454,7 @@ def search(query, top_k=None):
 
     # 0. 检查缓存（相同查询直接返回）
     if current_app.config.get("CACHE_ENABLED", True):
-        cached = cache_service.get(query, f"rag_{top_k}")
+        cached = cache_service_module.cache_service.get(query, f"rag_{top_k}")
         if cached is not None:
             logger.info(f"RAG cache hit: {query[:50]}")
             return cached
@@ -437,7 +479,7 @@ def search(query, top_k=None):
 
     # 5. 存入缓存
     if current_app.config.get("CACHE_ENABLED", True):
-        cache_service.set(query, final_results, f"rag_{top_k}", ttl_hours=1)
+        cache_service_module.cache_service.set(query, final_results, f"rag_{top_k}", ttl_hours=1)
 
     return final_results
 

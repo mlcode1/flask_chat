@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from langsmith import traceable
 from app.extensions import db
 from app.models import Conversation, Message
+from app.utils import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,7 @@ class ContextService:
 
     def count_tokens(self, text):
         """粗略估算 token 数（中文约 1.5 token/字，英文约 0.25 token/字）"""
-        if not text:
-            return 0
-        chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-        other_chars = len(text) - chinese_chars
-        return int(chinese_chars * 1.5 + other_chars * 0.25)
+        return estimate_tokens(text)
 
     @traceable(name="build_chat_context")
     def build_context(self, conversation_id):
