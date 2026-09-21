@@ -13,7 +13,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 - **多模型切换** — 支持配置多个大语言模型，用户可在对话中自由切换；兼容 OpenAI API 协议的任意服务（包括 Ollama 本地模型）
 - **WebSocket 流式输出** — 基于 Flask-SocketIO + eventlet 实现实时双向通信，逐字流式响应
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
-- **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、数据库查询、文件读取、知识库检索、网页搜索等工具；`web_search` 支持 Tavily / Bing / DuckDuckGo 多源自动切换
+- **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、数据库查询、文件读取、知识库检索等工具
 - **工具开关控制** — 知识库查询和代码库查询工具可通过页面顶部开关实时启用/禁用，无需重启服务
 - **RAG 知识检索** — 上传文档后，AI 可通过工具调用自动检索知识库回答问题；支持 BM25 + 向量混合检索（BM25 索引缓存，避免重复构建）、多查询重写、结果重排序
 - **代码库索引管理** — 通过 Web UI 管理代码仓库配置（名称 + 本地路径），支持全量构建与增量构建（混合方案：文件修改时间 + SHA256 哈希双重过滤），构建过程实时进度条，支持取消任务；AI 在对话中通过 `search_code` 工具自动检索相关代码片段，自动选择已索引仓库
@@ -49,7 +49,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 | 代码索引构建 | LlamaIndex + CodeSplitter（tree-sitter）+ PGVectorStore |
 | 文件解析 | pypdf、python-docx |
 | 可观测性 | LangSmith（`@traceable` 装饰器 + 环境变量） |
-| 安全 | Flask-Limiter（限流）、bleach + DOMPurify（XSS 防护） |
+| 安全 | API Key 认证、Prompt Injection 过滤、输入校验、审计日志 |
 | 代码索引查询 | psycopg2（直连 pgvector 索引） |
 | 容器化 | Docker + docker-compose |
 | 前端 | 原生 HTML / CSS / JavaScript（ES6 模块化 + marked.js 渲染 Markdown） |
@@ -108,20 +108,11 @@ flask_chat/
     ├── static/
     │   ├── css/style.css
     │   └── js/
-    │       ├── chat.js               # 主入口（ES6 模块化，~470 行）
+    │       ├── chat.js               # 主对话页交互逻辑（IIFE，~1666 行）
     │       ├── knowledge.js          # 知识库管理页独立逻辑
     │       ├── code_repos.js         # 代码库管理页独立逻辑
     │       ├── marked.min.js         # Markdown 渲染（本地）
-    │       ├── socket.io.min.js      # Socket.IO 客户端（本地）
-    │       └── modules/              # 前端模块化
-    │           ├── utils.js          # 通用工具函数
-    │           ├── socket.js         # WebSocket 连接管理
-    │           ├── message.js        # 消息渲染和格式化
-    │           ├── conversation.js   # 对话管理
-    │           ├── config.js         # 配置管理
-    │           ├── documents.js      # 知识库文档管理
-    │           ├── code-repos.js     # 代码库索引管理
-    │           └── debug.js          # 调试工具
+    │       └── socket.io.min.js      # Socket.IO 客户端（本地）
     └── templates/
         ├── index.html                # 主对话页
         ├── knowledge.html            # 知识库管理页（独立）
@@ -218,14 +209,10 @@ cp .env.example .env
 | `RAG_VECTOR_WEIGHT` | 混合检索中向量权重 | `0.7` |
 | `RAG_QUERY_REWRITE_ENABLED` | 是否启用多查询重写 | `false` |
 | `RAG_RERANK_ENABLED` | 是否启用结果重排序 | `false` |
-| `WEB_SEARCH_ENABLED` | 是否启用网页搜索工具 | `false` |
-| `WEB_SEARCH_PROVIDER` | 网页搜索提供商（tavily / bing / duckduckgo） | `duckduckgo` |
-| `TAVILY_API_KEY` | Tavily API Key（可选，最稳定） | 空 |
 | `CODE_EXEC_ENABLED` | 是否启用代码执行工具 | `true` |
 | `KNOWLEDGE_SEARCH_ENABLED` | 是否启用知识库检索工具（可在页面切换） | `false` |
 | `API_KEY` | API 鉴权密钥（留空则跳过鉴权） | 空 |
 | `INPUT_FILTER_ENABLED` | 是否启用 Prompt Injection 输入过滤 | `true` |
-| `RATELIMIT_STORAGE_URL` | API 限流存储后端（`memory://` 或 `redis://host:port`） | `memory://` |
 | **缓存配置** | | |
 | `CACHE_ENABLED` | 是否启用响应缓存 | `true` |
 | `CACHE_TTL_HOURS` | 缓存有效期（小时） | `1` |
@@ -544,7 +531,7 @@ pytest tests/ -v -s
 
 ### Introduction
 
-Flask Chat is an AI-powered chat application built with Flask. It supports multi-model switching, WebSocket streaming responses, tool calling, context compression with long-term memory, a RAG (Retrieval-Augmented Generation) knowledge base, LangSmith observability, an optional AI answer verification feature, and **code repository index management**. Data is stored in PostgreSQL (with the pgvector extension), and the frontend is a vanilla JavaScript ES6 modular application.
+Flask Chat is an AI-powered chat application built with Flask. It supports multi-model switching, WebSocket streaming responses, tool calling, context compression with long-term memory, a RAG (Retrieval-Augmented Generation) knowledge base, LangSmith observability, an optional AI answer verification feature, and **code repository index management**. Data is stored in PostgreSQL (with the pgvector extension), and the frontend is a vanilla JavaScript single-page application.
 
 ### Features
 
@@ -582,9 +569,9 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 | Code Index Builder | LlamaIndex + CodeSplitter (tree-sitter) + PGVectorStore |
 | File Parsing | pypdf, python-docx |
 | Observability | LangSmith (`@traceable` decorator + env vars) |
-| Security | Flask-Limiter, bleach + DOMPurify |
+| Security | API key auth, Prompt Injection filtering, input validation, audit logging |
 | Containerization | Docker + docker-compose |
-| Frontend | Vanilla HTML / CSS / JavaScript (ES6 modules + marked.js) |
+| Frontend | Vanilla HTML / CSS / JavaScript (IIFE + marked.js) |
 
 ### Quick Start
 
