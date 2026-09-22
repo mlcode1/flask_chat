@@ -31,7 +31,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 - **统一错误处理** — 基于 APIError 基类的统一异常体系，全局错误处理器保证一致的响应格式
 - **结构化日志** — 支持 JSON 格式和人类可读格式，请求级追踪（request_id）
 - **性能监控** — 内置请求耗时、模型调用、工具执行等关键指标的监控
-- **安全防护** — 可选 API Key 鉴权、Prompt Injection 输入过滤、XSS 防护（前后端双重消毒）、API 限流（支持 Redis 共享计数）、输入校验、审计日志
+- **安全防护** — 可选 API Key 鉴权、Prompt Injection 输入过滤、审计日志、数据库查询表级访问控制
 - **Docker 容器化** — 提供 Dockerfile 和 docker-compose.yml，支持一键容器化部署
 
 ### 技术栈
@@ -52,7 +52,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多模�
 | 安全 | API Key 认证、Prompt Injection 过滤、输入校验、审计日志 |
 | 代码索引查询 | psycopg2（直连 pgvector 索引） |
 | 容器化 | Docker + docker-compose |
-| 前端 | 原生 HTML / CSS / JavaScript（ES6 模块化 + marked.js 渲染 Markdown） |
+| 前端 | 原生 HTML / CSS / JavaScript（IIFE + marked.js 渲染 Markdown） |
 
 ### 项目结构
 
@@ -99,7 +99,7 @@ flask_chat/
     │   ├── context_service.py        # 上下文管理（窗口裁剪 + 压缩 + 长期记忆）
     │   ├── rag_service.py            # RAG 服务（解析/分块/嵌入/存储/混合检索/BM25缓存）
     │   ├── verifier_service.py       # 结果验证服务（独立 Agent 验证）
-    │   ├── tool_service.py           # 工具定义与执行（多源 web_search 等）
+    │   ├── tool_service.py           # 工具定义与执行（search_code、knowledge_search 等）
     │   ├── cache_service.py          # 响应缓存（内存/Redis 双模式）
     │   ├── retry_service.py          # 重试与降级（指数退避 + fallback）
     │   ├── security_service.py       # 安全（API Key 认证 / 注入过滤 / 审计日志）
@@ -240,7 +240,7 @@ cp .env.example .env
 | `CODE_INDEX_DB_USER` | 代码索引数据库用户 | `postgres` |
 | `CODE_INDEX_DB_PASSWORD` | 代码索引数据库密码 | - |
 | `CODE_INDEX_DB_NAME` | 代码索引数据库名称 | `flask_chat` |
-| `CODE_INDEX_DEFAULT_REPO` | 默认代码仓库名称（搜索时优先使用） | `flask_chat` |
+| `CODE_INDEX_DEFAULT_REPO` | 默认代码仓库名称（工具描述中提示 LLM） | `flask_chat` |
 | `CODE_INDEX_TOP_K` | 代码搜索返回结果数量 | `5` |
 | **索引构建配置** | | |
 | `CODE_INDEX_CHUNK_LINES` | 代码分块行数 | `100` |
@@ -381,11 +381,13 @@ EMBEDDING_DIM=3072
 - 添加/删除代码仓库配置（仓库名称 + 本地路径）
 - 全量构建索引（清空重建）
 - 增量构建索引（混合方案：文件修改时间初筛 + SHA256 哈希验证，只索引新增/修改的文件，自动清理已删除文件的索引）
-- 构建过程实时进度条（每 3 秒轮询）
+- 构建过程 WebSocket 实时进度推送（索引状态实时更新，页面切换后返回可查看当前进度）
 - 取消正在进行的索引任务
 - 搜索测试
 - 敏感内容自动过滤（API Key、密码、Token 等）
 - **混合摘要方案**：代码文件使用零 token 的结构化元数据提取（函数签名、类定义、导入声明），非代码文件使用 LLM 摘要
+- **跨仓库搜索**：支持同时搜索多个已索引仓库，按相关度排序返回结果；工具描述中动态列出所有可选仓库，引导 LLM 正确选择目标仓库
+- **数据访问控制**：开关关闭时，不仅隐藏工具定义，还在数据库查询层面禁止访问相关表，防止通过 `query_database` 等替代路径绕过
 
 **索引原理：**
 
@@ -396,8 +398,9 @@ EMBEDDING_DIM=3072
 
 **搜索时的仓库选择逻辑：**
 
-- 指定了仓库名：先校验该仓库是否已索引，未索引则直接返回空结果
-- 未指定仓库名：自动查找已索引的仓库列表，优先使用配置中的默认仓库（`CODE_INDEX_DEFAULT_REPO`），否则使用第一个已索引的仓库
+- 指定了仓库名：直接搜索该仓库（LLM 从工具描述的可选列表中选择）
+- 未指定仓库名：自动搜索所有已索引的仓库，按相关度排序返回结果
+- 工具描述中动态列出所有已索引仓库名称，引导 LLM 正确选择目标仓库
 
 ### 使用说明
 
@@ -538,7 +541,7 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Multi-Model Support** — Configure multiple LLMs and switch between them during conversations; compatible with any OpenAI-protocol service (including Ollama local models)
 - **WebSocket Streaming** — Real-time bidirectional communication via Flask-SocketIO + eventlet, token-by-token streaming responses
 - **Stream Interruption** — Stop AI generation at any time
-- **Tool Calling** — Function Calling with built-in tools: current time, math calculation, code execution, database query, file reading, knowledge-base search, web search; `web_search` supports Tavily / Bing / DuckDuckGo with automatic fallback
+- **Tool Calling** — Function Calling with built-in tools: current time, math calculation, code execution, database query, file reading, knowledge-base search; `search_code` supports cross-repository search with dynamic repository listing
 - **Tool Toggle Control** — Knowledge base search and code repository search tools can be enabled/disabled in real-time via header toggles
 - **RAG Knowledge Base** — Upload documents and let the AI automatically search the knowledge base when answering questions; supports BM25 + vector hybrid search (with BM25 index caching), multi-query rewriting, and result reranking
 - **Code Index Management** — Manage code repository configurations via Web UI, supports full and incremental indexing with real-time progress bar and task cancellation; hybrid summary approach (structural extraction for code files, LLM for non-code files)
@@ -552,7 +555,7 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Structured Logging** — JSON and human-readable formats with request-level tracing
 - **Performance Monitoring** — Built-in request timing, model call metrics, and tool execution tracking
 - **Docker Containerization** — Dockerfile and docker-compose.yml for one-command deployment
-- **Security** — Optional API key auth, Prompt Injection filtering, XSS protection, rate limiting, audit logging
+- **Security** — Optional API key auth, Prompt Injection filtering, audit logging, table-level access control
 
 ### Tech Stack
 
