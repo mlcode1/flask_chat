@@ -154,19 +154,19 @@ def register_handlers(socketio, app):
                 'status': 'generating'
             })
 
-            # 启动后台生成线程
+            # 启动后台生成任务（使用 socketio.start_background_task 确保 WebSocket 事件能正常推送）
             room = f"conv_{conv_id}"
             stop_event = threading.Event()
-            thread = threading.Thread(
-                target=generate_ai_response,
-                args=(app, int(conv_id), msg_id, content, model, image_urls, room, stop_event)
+            
+            # 使用 socketio.start_background_task 启动后台任务
+            from app import socketio
+            socketio.start_background_task(
+                generate_ai_response,
+                app, int(conv_id), msg_id, content, model, image_urls, room, stop_event
             )
-            thread.daemon = True
-            thread.start()
 
             # 记录生成任务
             _active_generations[msg_id] = {
-                'thread': thread,
                 'content': '',
                 'stop_event': stop_event,
                 'status': 'generating'
@@ -361,13 +361,12 @@ def _finish_generation(msg_id, content, room, tool_calls_log, interrupted=False,
 
     # 延迟清理全局状态（给客户端时间接收事件）
     def cleanup():
-        import time
-        time.sleep(10)
+        import eventlet
+        eventlet.sleep(10)
         _active_generations.pop(msg_id, None)
 
-    cleanup_thread = threading.Thread(target=cleanup)
-    cleanup_thread.daemon = True
-    cleanup_thread.start()
+    from app import socketio
+    socketio.start_background_task(cleanup)
 
 
 # ========== 辅助函数 ==========
@@ -379,6 +378,9 @@ def _send_token(room, msg_id, token):
         'message_id': msg_id,
         'token': token
     }, room=room)
+    # 让出控制权给 eventlet 事件循环，确保事件被发送
+    import eventlet
+    eventlet.sleep(0)
 
 
 def _send_tool_calls(room, msg_id, tool_calls):

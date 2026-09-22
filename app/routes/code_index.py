@@ -4,11 +4,14 @@ Code Index Routes - 代码库索引管理 API
 import os
 import threading
 import time
+import logging
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app
 from app.models import db, CodeRepository, IndexedFile
 from app.services.code_index_builder import build_index, delete_index
 from app.services.security_service import require_api_key
+
+logger = logging.getLogger(__name__)
 
 code_index_bp = Blueprint('code_index', __name__, url_prefix='/api/code-repos')
 
@@ -27,9 +30,23 @@ PROGRESS_TIMEOUT = 600  # 10分钟无进度更新视为超时
 def list_repos():
     """获取所有代码仓库配置"""
     repos = CodeRepository.query.order_by(CodeRepository.created_at.desc()).all()
+    
+    # 如果有正在索引的仓库，从内存获取最新进度
+    result = []
+    for repo in repos:
+        repo_dict = repo.to_dict()
+        if repo.status == 'indexing':
+            # 从内存获取最新进度
+            with _indexing_lock:
+                progress_data = _indexing_progress.get(repo.id, {})
+                if progress_data:
+                    repo_dict['progress'] = progress_data.get('progress', repo.progress)
+                    repo_dict['progress_message'] = progress_data.get('message', repo.progress_message)
+        result.append(repo_dict)
+    
     return jsonify({
         'status': 'success',
-        'repos': [repo.to_dict() for repo in repos],
+        'repos': result,
     })
 
 
@@ -164,11 +181,12 @@ def trigger_index(repo_id):
     # 初始化取消标志
     _cancel_flags[repo_id] = False
 
-    # 在后台线程中执行索引构建
+    # 在后台任务中执行索引构建（使用 socketio.start_background_task 确保 WebSocket 可用）
     app = current_app._get_current_object()  # 获取应用对象用于后台线程
     
     def _run_index():
-        with app.app_context():  # 在后台线程中创建应用上下文
+        with app.app_context():  # 在后台任务中创建应用上下文
+            from app import socketio  # 在应用上下文中导入 socketio
             try:
                 def progress_callback(progress, message):
                     # 检查取消标志
@@ -182,7 +200,19 @@ def trigger_index(repo_id):
                             'status': 'indexing',
                             'last_update': time.time()  # 更新最后更新时间
                         }
-                    # 同时更新数据库（可选，用于持久化）
+                    # 通过 WebSocket 推送进度给所有客户端
+                    try:
+                        logger.debug(f"发送进度事件: repo_id={repo_id}, progress={progress}, message={message}")
+                        socketio.emit('index_progress', {
+                            'repo_id': repo_id,
+                            'progress': progress,
+                            'message': message,
+                            'status': 'indexing'
+                        })
+                        logger.debug("进度事件发送成功")
+                    except Exception as ws_err:
+                        logger.warning(f"WebSocket 推送进度失败: {ws_err}")
+                    # 同时更新数据库（用于持久化）
                     try:
                         repo_ref = CodeRepository.query.get(repo_id)
                         if repo_ref:
@@ -230,6 +260,22 @@ def trigger_index(repo_id):
                         'last_update': time.time()
                     }
 
+                # 通过 WebSocket 推送最终结果
+                # 注意：前端检查 status === 'indexed' || 'failed'，不是 'success'/'error'
+                final_status = 'indexed' if result['status'] == 'success' else 'failed'
+                try:
+                    socketio.emit('index_progress', {
+                        'repo_id': repo_id,
+                        'progress': 100 if result['status'] == 'success' else 0,
+                        'message': '索引完成' if result['status'] == 'success' else result.get('error', '未知错误'),
+                        'status': final_status,
+                        'file_count': result.get('file_count', 0),
+                        'chunk_count': result.get('chunk_count', 0),
+                    })
+                    logger.info(f"索引完成推送: repo_id={repo_id}, status={final_status}")
+                except Exception as ws_err:
+                    logger.warning(f"WebSocket 推送完成结果失败: {ws_err}")
+
             except Exception as e:
                 repo_ref = CodeRepository.query.get(repo_id)
                 if repo_ref:
@@ -246,16 +292,29 @@ def trigger_index(repo_id):
                         'status': 'failed',
                         'last_update': time.time()
                     }
+                
+                # 通过 WebSocket 推送失败结果
+                try:
+                    socketio.emit('index_progress', {
+                        'repo_id': repo_id,
+                        'progress': 0,
+                        'message': str(e),
+                        'status': 'failed',
+                    })
+                    logger.info(f"索引失败推送: repo_id={repo_id}, status=failed")
+                except Exception as ws_err:
+                    logger.warning(f"WebSocket 推送失败结果失败: {ws_err}")
             finally:
                 # 清理线程引用
                 _indexing_threads.pop(repo_id, None)
                 _cancel_flags.pop(repo_id, None)
 
-    thread = threading.Thread(target=_run_index, daemon=True)
-    thread.start()
+    # 使用 socketio.start_background_task 启动后台任务，确保 WebSocket 事件能正常推送
+    from app import socketio
+    socketio.start_background_task(_run_index)
     
-    # 存储线程引用
-    _indexing_threads[repo_id] = thread
+    # 存储任务引用（用于取消）
+    _indexing_threads[repo_id] = True
 
     return jsonify({
         'status': 'success',

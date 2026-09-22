@@ -67,11 +67,20 @@ def _build_tools_list():
 
     # 代码库搜索（按配置决定是否启用）
     if current_app.config.get("CODE_INDEX_ENABLED", False):
+        # 动态获取已索引的仓库列表，写入工具描述让 LLM 知道有哪些仓库可选
+        try:
+            from app.services.code_index_service import list_indexed_repos
+            indexed_repos = list_indexed_repos()
+        except Exception:
+            indexed_repos = []
+        
+        repo_list_str = "、".join(indexed_repos) if indexed_repos else "暂无已索引仓库"
+        
         tools.append({
             "type": "function",
             "function": {
                 "name": "search_code",
-                "description": "在已索引的代码库中搜索相关代码片段。当用户的问题涉及代码结构、函数实现、文件内容、类定义、API 接口等代码相关问题时使用此工具。",
+                "description": f"在已索引的代码库中搜索相关代码片段。当用户的问题涉及代码结构、函数实现、文件内容、类定义、API 接口等代码相关问题时使用此工具。当前已索引的代码库：{repo_list_str}。请根据用户提到的项目名称选择对应的 repo 参数。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -81,7 +90,7 @@ def _build_tools_list():
                         },
                         "repo": {
                             "type": "string",
-                            "description": "要搜索的仓库名称（可选，不传则搜索默认仓库）"
+                            "description": f"要搜索的仓库名称。当前可选：{repo_list_str}。当用户提到某个项目名时，应传入对应的仓库名。"
                         }
                     },
                     "required": ["query"]
@@ -441,6 +450,8 @@ def _ddg_search(query: str, max_results: int) -> str:
 
 def _exec_knowledge_search(args):
     """知识库检索"""
+    if not current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False):
+        return json.dumps({"message": "知识库查询功能未启用", "results": []})
     try:
         from app.services.rag_service import search
         results = search(args["query"])
@@ -541,6 +552,18 @@ def _exec_query_database(args):
             if table_prefix in sql_lower:
                 return json.dumps({"error": f"代码库查询功能已关闭，不允许访问 {table_prefix}* 相关表"})
 
+    # 表级访问控制：当知识库查询关闭时，禁止查询知识库相关的表
+    if not current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False):
+        knowledge_tables = [
+            "documents",         # 知识库文档表
+            "document_chunks",   # 文档分块表
+        ]
+        sql_lower = sql.lower()
+        for table_name in knowledge_tables:
+            # 匹配表名（防止子串匹配，如 "my_documents" 不应被误判）
+            if re.search(rf'\b{table_name}\b', sql_lower):
+                return json.dumps({"error": f"知识库查询功能已关闭，不允许访问 {table_name} 表"})
+
     try:
         from app.extensions import db
         result = db.session.execute(db.text(sql))
@@ -567,6 +590,10 @@ def _exec_read_file(args):
     # 安全检查：防止路径遍历
     if ".." in filename or "/" in filename or "\\" in filename:
         return json.dumps({"error": "无效的文件名"})
+
+    # 数据访问层权限控制：知识库查询关闭时，禁止通过 read_file 读取知识库文档
+    if not current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False):
+        return json.dumps({"error": "知识库查询功能未启用，无法读取知识库文件"})
 
     # 在知识库文档中查找
     from app.models import Document, DocumentChunk

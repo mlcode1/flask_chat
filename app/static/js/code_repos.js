@@ -1,6 +1,6 @@
 /**
  * code_repos.js - 代码库管理页面专用脚本
- * 用于 /code-repos 页面
+ * 用于 /code-repos 页面，通过 WebSocket 接收索引进度
  */
 (function () {
     const addRepoBtn = document.getElementById("add-repo-btn");
@@ -13,7 +13,60 @@
     const statsEl = document.getElementById("code-repos-stats");
 
     let currentRepoForSearch = null;
-    let progressPollingIntervals = {};
+
+    // ========== WebSocket 连接 ==========
+    const socket = io({
+        transports: ['websocket'],
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionAttempts: 5
+    });
+
+    socket.on('connect', () => {
+        console.log('[WS] 代码库页面已连接');
+    });
+
+    socket.on('disconnect', () => {
+        console.log('[WS] 代码库页面已断开');
+    });
+
+    // 监听索引进度推送
+    socket.on('index_progress', (data) => {
+        console.log('[WS] 收到索引进度:', data);
+        const { repo_id, progress, message, status } = data;
+
+        // 更新进度条
+        const repoItem = document.querySelector(`.code-repo-item[data-id="${repo_id}"]`);
+        if (repoItem) {
+            const progressFill = repoItem.querySelector('.progress-fill');
+            const progressText = repoItem.querySelector('.progress-text');
+
+            if (progressFill) {
+                const progressPercent = progress || 0;
+                progressFill.style.width = `${progressPercent}%`;
+            }
+            if (progressText) {
+                const progressPercent = progress || 0;
+                const msg = message || '处理中...';
+                progressText.textContent = `${msg} (${progressPercent}%)`;
+            }
+        } else {
+            console.warn('[WS] 找不到仓库元素, repo_id:', repo_id);
+        }
+
+        // 索引完成或失败时，刷新列表和统计
+        if (status === 'indexed' || status === 'failed') {
+            console.log('[WS] 索引完成/失败，刷新列表, status:', status);
+            loadCodeRepos();
+            loadCodeReposStats();
+
+            if (status === 'indexed') {
+                showToast('索引构建完成', 'success');
+            } else if (status === 'failed') {
+                showToast(`索引构建失败: ${message || '未知错误'}`, 'error');
+            }
+        }
+    });
 
     // ========== Toast 提示 ==========
     function showToast(message, type = 'info', duration = 3000) {
@@ -143,7 +196,7 @@
                             <div class="progress-bar">
                                 <div class="progress-fill" style="width: ${repo.progress || 0}%"></div>
                             </div>
-                            <div class="progress-text">${repo.progress_message || '准备中...'}</div>
+                            <div class="progress-text">${repo.progress_message || '准备中...'}${repo.progress ? ` (${repo.progress}%)` : ''}</div>
                         </div>
                     ` : '';
 
@@ -175,71 +228,12 @@
                 }).join("");
 
                 bindCodeRepoEvents();
-
-                data.repos.forEach(repo => {
-                    if (repo.status === 'indexing') {
-                        startProgressPolling(repo.id);
-                    } else {
-                        stopProgressPolling(repo.id);
-                    }
-                });
+                // 不再启动轮询，WebSocket 会自动推送进度
             } else {
                 codeRepoList.innerHTML = '<div class="kb-empty">暂无代码库，点击 + 添加</div>';
             }
         } catch (e) {
             console.error("加载代码库列表失败:", e);
-        }
-    }
-
-    // ========== 进度轮询 ==========
-    function startProgressPolling(repoId) {
-        if (progressPollingIntervals[repoId]) return;
-
-        progressPollingIntervals[repoId] = setInterval(async () => {
-            try {
-                const res = await fetch(`/api/code-repos/${repoId}/progress`);
-                const data = await res.json();
-
-                if (data.status === 'success') {
-                    const repoItem = document.querySelector(`.code-repo-item[data-id="${repoId}"]`);
-                    if (repoItem) {
-                        const progressFill = repoItem.querySelector('.progress-fill');
-                        const progressText = repoItem.querySelector('.progress-text');
-
-                        if (progressFill) {
-                            const progressPercent = data.progress || 0;
-                            progressFill.style.width = `${progressPercent}%`;
-                            progressFill.offsetHeight;
-                        }
-                        if (progressText) {
-                            const progressPercent = data.progress || 0;
-                            const message = data.message || '处理中...';
-                            progressText.textContent = `${message} (${progressPercent}%)`;
-                        }
-                    }
-
-                    if (data.repo_status !== 'indexing') {
-                        stopProgressPolling(repoId);
-                        loadCodeRepos();
-                        loadCodeReposStats();
-
-                        if (data.repo_status === 'indexed') {
-                            showToast('索引构建完成', 'success');
-                        } else if (data.repo_status === 'failed') {
-                            showToast('索引构建失败', 'error');
-                        }
-                    }
-                }
-            } catch (e) {
-                console.error('轮询进度失败:', e);
-            }
-        }, 3000);
-    }
-
-    function stopProgressPolling(repoId) {
-        if (progressPollingIntervals[repoId]) {
-            clearInterval(progressPollingIntervals[repoId]);
-            delete progressPollingIntervals[repoId];
         }
     }
 
@@ -404,7 +398,6 @@
 
             if (data.status === 'success') {
                 showToast('已取消索引任务', 'success');
-                stopProgressPolling(repoId);
                 loadCodeRepos();
             } else {
                 showToast(data.message || '取消失败', 'error');

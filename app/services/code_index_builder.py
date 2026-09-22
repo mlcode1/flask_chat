@@ -454,8 +454,9 @@ def generate_file_summary(file_path: str, content: str, client: OpenAI, model: s
     ext = Path(file_path).suffix.lower()
     file_name = Path(file_path).name
     summary_text = ''
+    is_code = _is_code_file(ext)
 
-    if _is_code_file(ext):
+    if is_code:
         # ===== 代码文件：结构化提取（零 token） =====
         if ext == '.py':
             summary_text = _extract_python_metadata(content)
@@ -474,11 +475,11 @@ def generate_file_summary(file_path: str, content: str, client: OpenAI, model: s
 
         # 如果提取结果太短（< 50 字符），说明文件结构不清晰，降级到 LLM
         if len(summary_text.strip()) < 50:
-            logger.info(f"代码文件 {file_path} 结构化提取结果太短，降级到 LLM")
+            logger.info(f"代码文件 {file_path} 结构化提取结果太短({len(summary_text)}字符)，降级到 LLM")
             summary_text = ''  # 清空，走下面的 LLM 降级
     else:
         # ===== 非代码文件：直接用 LLM =====
-        pass
+        logger.info(f"非代码文件，将使用 LLM 生成摘要: {file_path} (ext={ext}, content_len={len(content)})")
 
     # 如果结构化提取已完成，直接返回（零 token）
     if summary_text:
@@ -495,6 +496,7 @@ def generate_file_summary(file_path: str, content: str, client: OpenAI, model: s
 请用一句话描述这个文件的主要功能和用途。"""
 
     try:
+        logger.info(f"调用 LLM 生成摘要: {file_path} (model={model}, content_preview_len={len(content_preview)})")
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
@@ -510,12 +512,14 @@ def generate_file_summary(file_path: str, content: str, client: OpenAI, model: s
         if not summary:
             raise ValueError("LLM 返回空白内容")
 
-        logger.debug(f"LLM 摘要: {file_path}")
+        logger.info(f"LLM 摘要成功: {file_path} -> {summary[:80]}")
         return f"文件: {file_path}\n{summary}"
     except Exception as e:
         logger.warning(f"LLM 摘要生成失败 {file_path}: {e}")
         # 最终降级：使用文件名 + 内容前 200 字符
-        return f"文件: {file_path}\n{file_name} - {ext}文件\n{content[:200]}"
+        fallback = f"文件: {file_path}\n{file_name} - {ext}文件\n{content[:200]}"
+        logger.info(f"使用 fallback 摘要: {file_path} (len={len(fallback)})")
+        return fallback
 
 
 def build_index(repo_id: int, repo_name: str, repo_path: str, reindex: bool = True, mode: str = 'full', progress_callback=None):
@@ -757,6 +761,28 @@ def build_index(repo_id: int, repo_name: str, repo_path: str, reindex: bool = Tr
         # 如果重新索引，先清空表
         if reindex:
             logger.info(f"重新索引模式，将清空表: data_{summaries_table_name}, data_{chunks_table_name}")
+            try:
+                import psycopg2
+                conn = psycopg2.connect(
+                    host=db_host, port=db_port, user=db_user,
+                    password=db_password, database=db_name
+                )
+                cursor = conn.cursor()
+                
+                # 清空摘要表
+                actual_summaries_table = f"data_{summaries_table_name}"
+                cursor.execute(f"TRUNCATE TABLE {actual_summaries_table}")
+                
+                # 清空代码块表
+                actual_chunks_table = f"data_{chunks_table_name}"
+                cursor.execute(f"TRUNCATE TABLE {actual_chunks_table}")
+                
+                conn.commit()
+                cursor.close()
+                conn.close()
+                logger.info("已清空旧索引数据")
+            except Exception as e:
+                logger.warning(f"清空旧数据失败: {e}")
 
         summaries_storage_context = StorageContext.from_defaults(vector_store=summaries_vector_store)
         chunks_storage_context = StorageContext.from_defaults(vector_store=chunks_vector_store)

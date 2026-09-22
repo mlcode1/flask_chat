@@ -747,6 +747,9 @@
         fullContent = "";
         toolCalls = [];
 
+        // 确保客户端在对话房间中（新对话创建后可能还没 join）
+        socket.emit('join', { conversation_id: currentConvId });
+
         // 先注册 message_created 监听器，再 emit chat_message
         // 避免事件在监听器注册前到达导致丢失
         socket.once('message_created', (data) => {
@@ -1068,11 +1071,27 @@
         interruptBtn.addEventListener("click", interrupt);
 
         messageInput.addEventListener("keydown", function (e) {
+            // 忽略 IME 输入法组合过程中的回车（如中文输入法确认拼音转英文）
+            if (e.isComposing || e.keyCode === 229) return;
             if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();
             }
         });
+        // 部分浏览器在 compositionend 后会再触发一次 keydown(Enter)，用 compositionend 标记忽略
+        messageInput.addEventListener("compositionstart", function () {
+            this._isComposing = true;
+        });
+        messageInput.addEventListener("compositionend", function () {
+            this._isComposing = false;
+        });
+        // 补充检查：keydown 也看 _isComposing 标志
+        const origKeydown = messageInput.onkeydown;
+        messageInput.addEventListener("keydown", function (e) {
+            if (this._isComposing && e.key === "Enter") {
+                e.stopImmediatePropagation();
+            }
+        }, true);  // capture phase 优先拦截
 
         messageInput.addEventListener("input", function () {
             this.style.height = "auto";

@@ -20,7 +20,8 @@ from app.services.security_service import (
     require_api_key, filter_input, log_audit
 )
 from app.middleware import get_disclaimer
-from app.services.cache_service import cache_service, hash_context
+from app.services import cache_service as cache_service_module
+from app.services.cache_service import hash_context
 from app.errors import BadRequestError, NotFoundError
 
 
@@ -140,7 +141,7 @@ def health_check():
         "status": "healthy" if db_status == "ok" else "degraded",
         "database": db_status,
         "cache": cache_status,
-        "cache_stats": cache_service.stats() if current_app.config.get("CACHE_ENABLED") else None,
+        "cache_stats": cache_service_module.cache_service.stats() if cache_service_module.cache_service and current_app.config.get("CACHE_ENABLED") else None,
         "models": {
             "default": current_app.config["OPENAI_MODEL"],
             "available": current_app.config["AVAILABLE_MODELS"],
@@ -154,8 +155,10 @@ def health_check():
 @require_api_key
 def clear_cache():
     """清空缓存"""
-    cache_service.clear()
-    return jsonify({"status": "cleared", "message": "缓存已清空"})
+    if cache_service_module.cache_service:
+        cache_service_module.cache_service.clear()
+        return jsonify({"status": "cleared", "message": "缓存已清空"})
+    return jsonify({"status": "error", "message": "缓存服务未初始化"}), 500
 
 
 # ============================================================

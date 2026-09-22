@@ -82,145 +82,146 @@ def search_code(query: str, repo_name: str = None, top_k: int = None) -> list[di
         top_k = current_app.config.get("CODE_INDEX_TOP_K", 8)
     
     if repo_name is not None:
-        # 指定了仓库名，先校验该仓库是否已索引
-        indexed_repos = list_indexed_repos()
-        if repo_name not in indexed_repos:
-            if indexed_repos:
-                logger.warning(f"仓库 '{repo_name}' 未索引，已索引的仓库: {', '.join(indexed_repos)}")
-            else:
-                logger.warning("没有找到任何已索引的代码库")
-            return []
+        # 指定了仓库名，直接使用（LLM 已从工具描述的可选列表中选择）
+        repos_to_search = [repo_name]
     else:
-        # 没有指定仓库时，自动查找已索引的仓库
+        # 没有指定仓库时，搜索所有已索引的仓库
         indexed_repos = list_indexed_repos()
         if not indexed_repos:
             logger.warning("没有找到任何已索引的代码库")
             return []
-        # 优先使用配置中的默认仓库，如果它已索引的话
-        default_repo = current_app.config.get("CODE_INDEX_DEFAULT_REPO", "")
-        if default_repo and default_repo in indexed_repos:
-            repo_name = default_repo
-        else:
-            # 使用第一个已索引的仓库
-            repo_name = indexed_repos[0]
-            logger.info(f"未指定仓库名，自动选择: {repo_name}")
+        repos_to_search = indexed_repos
+        logger.info(f"未指定仓库名，搜索所有已索引仓库: {', '.join(repos_to_search)}")
     
-    logger.info(f"开始两层搜索: repo={repo_name}, query={query[:50]}, top_k={top_k}")
+    all_results = []
     
-    summaries_table = f"data_code_summaries_{repo_name}"
-    chunks_table = f"data_code_chunks_{repo_name}"
-    
-    try:
-        # 1. 生成查询向量
-        query_embedding = get_query_embedding(query)
-        logger.info(f"查询向量生成成功，维度: {len(query_embedding)}")
+    for repo_name in repos_to_search:
+        logger.info(f"开始两层搜索: repo={repo_name}, query={query[:50]}, top_k={top_k}")
         
-        # 2. 查询数据库
-        conn = get_code_index_db_connection()
-        cursor = conn.cursor()
+        summaries_table = f"data_code_summaries_{repo_name}"
+        chunks_table = f"data_code_chunks_{repo_name}"
         
-        # ========== 第一层：在文件摘要中查找最相关的文件 ==========
-        logger.info(f"第一层搜索: 查询 {summaries_table} 表")
-        summary_sql = f"""
-            SELECT 
-                text,
-                metadata_,
-                1 - (embedding <=> %s::vector) as similarity
-            FROM {summaries_table}
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-        """
-        
-        cursor.execute(summary_sql, (query_embedding, query_embedding, top_k * 2))
-        summary_results = cursor.fetchall()
-        
-        logger.info(f"第一层搜索结果: {len(summary_results)} 条")
-        
-        if not summary_results:
-            logger.warning("第一层搜索未找到任何结果，尝试降级到单层搜索")
-            cursor.close()
-            conn.close()
-            # 降级到单层搜索
-            return _fallback_single_layer_search(query, repo_name, top_k, query_embedding)
-        
-        # 提取相关文件路径
-        relevant_files = []
-        for i, (_, metadata_json, similarity) in enumerate(summary_results):
-            try:
-                metadata = _parse_metadata(metadata_json)
-                file_path = metadata.get('file_path', '')
-                if file_path and file_path not in relevant_files:
-                    relevant_files.append(file_path)
-                    if i < 3:  # 只记录前3个
-                        logger.debug(f"  相关文件 {i+1}: {file_path} (相似度: {similarity:.3f})")
-            except:
-                pass
-        
-        if not relevant_files:
-            logger.warning("第一层搜索未提取到文件路径，尝试降级到单层搜索")
-            cursor.close()
-            conn.close()
-            return _fallback_single_layer_search(query, repo_name, top_k, query_embedding)
-        
-        logger.info(f"第一层搜索找到 {len(relevant_files)} 个相关文件")
-        
-        # ========== 第二层：在相关文件的代码块中精确搜索 ==========
-        logger.info(f"第二层搜索: 在 {len(relevant_files)} 个文件中查询 {chunks_table} 表")
-        
-        # 构建 IN 子句（使用参数化查询防止 SQL 注入）
-        placeholders = ','.join(['%s'] * len(relevant_files))
-        
-        chunk_sql = f"""
-            SELECT 
-                text,
-                metadata_,
-                1 - (embedding <=> %s::vector) as similarity
-            FROM {chunks_table}
-            WHERE metadata_->>'file_path' IN ({placeholders})
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-        """
-        
-        # 参数：query_embedding, file_paths..., query_embedding, top_k
-        chunk_params = [query_embedding] + relevant_files + [query_embedding, top_k]
-        cursor.execute(chunk_sql, chunk_params)
-        chunk_results = cursor.fetchall()
-        
-        logger.info(f"第二层搜索结果: {len(chunk_results)} 条")
-        
-        cursor.close()
-        conn.close()
-        
-        # 3. 格式化结果
-        formatted_results = []
-        for text, metadata_json, similarity in chunk_results:
-            try:
-                metadata = _parse_metadata(metadata_json)
-            except:
-                metadata = {}
+        try:
+            # 1. 生成查询向量
+            query_embedding = get_query_embedding(query)
+            logger.info(f"查询向量生成成功，维度: {len(query_embedding)}")
             
-            formatted_results.append({
-                "content": text,
-                "file_path": metadata.get("file_path", ""),
-                "file_name": metadata.get("file_name", ""),
-                "file_type": metadata.get("file_type", ""),
-                "repo": metadata.get("repo", repo_name),
-                "score": float(similarity) if similarity else 0.0,
-            })
-        
-        if not formatted_results:
-            logger.warning("两层搜索未返回结果，尝试降级到单层搜索")
-            return _fallback_single_layer_search(query, repo_name, top_k, query_embedding)
-        
-        logger.info(f"两层搜索完成，返回 {len(formatted_results)} 个代码块")
-        return formatted_results
-        
-    except psycopg2.Error as e:
-        logger.error(f"Code index 数据库查询失败: {e}", exc_info=True)
-        return []
-    except Exception as e:
-        logger.error(f"Code index 查询异常: {e}", exc_info=True)
-        return []
+            # 2. 查询数据库
+            conn = get_code_index_db_connection()
+            cursor = conn.cursor()
+            
+            # ========== 第一层：在文件摘要中查找最相关的文件 ==========
+            logger.info(f"第一层搜索: 查询 {summaries_table} 表")
+            summary_sql = f"""
+                SELECT 
+                    text,
+                    metadata_,
+                    1 - (embedding <=> %s::vector) as similarity
+                FROM {summaries_table}
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+            """
+            
+            cursor.execute(summary_sql, (query_embedding, query_embedding, top_k * 2))
+            summary_results = cursor.fetchall()
+            
+            logger.info(f"第一层搜索结果: {len(summary_results)} 条")
+            
+            if not summary_results:
+                logger.warning("第一层搜索未找到任何结果，尝试降级到单层搜索")
+                cursor.close()
+                conn.close()
+                # 降级到单层搜索
+                fallback_results = _fallback_single_layer_search(query, repo_name, top_k, query_embedding)
+                all_results.extend(fallback_results)
+                continue
+            
+            # 提取相关文件路径
+            relevant_files = []
+            for i, (_, metadata_json, similarity) in enumerate(summary_results):
+                try:
+                    metadata = _parse_metadata(metadata_json)
+                    file_path = metadata.get('file_path', '')
+                    if file_path and file_path not in relevant_files:
+                        relevant_files.append(file_path)
+                        if i < 3:  # 只记录前3个
+                            logger.debug(f"  相关文件 {i+1}: {file_path} (相似度: {similarity:.3f})")
+                except:
+                    pass
+            
+            if not relevant_files:
+                logger.warning("第一层搜索未提取到文件路径，尝试降级到单层搜索")
+                cursor.close()
+                conn.close()
+                fallback_results = _fallback_single_layer_search(query, repo_name, top_k, query_embedding)
+                all_results.extend(fallback_results)
+                continue
+            
+            logger.info(f"第一层搜索找到 {len(relevant_files)} 个相关文件")
+            
+            # ========== 第二层：在相关文件的代码块中精确搜索 ==========
+            logger.info(f"第二层搜索: 在 {len(relevant_files)} 个文件中查询 {chunks_table} 表")
+            
+            # 构建 IN 子句（使用参数化查询防止 SQL 注入）
+            placeholders = ','.join(['%s'] * len(relevant_files))
+            
+            chunk_sql = f"""
+                SELECT 
+                    text,
+                    metadata_,
+                    1 - (embedding <=> %s::vector) as similarity
+                FROM {chunks_table}
+                WHERE metadata_->>'file_path' IN ({placeholders})
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+            """
+            
+            # 参数：query_embedding, file_paths..., query_embedding, top_k
+            chunk_params = [query_embedding] + relevant_files + [query_embedding, top_k]
+            cursor.execute(chunk_sql, chunk_params)
+            chunk_results = cursor.fetchall()
+            
+            logger.info(f"第二层搜索结果: {len(chunk_results)} 条")
+            
+            cursor.close()
+            conn.close()
+            
+            # 3. 格式化结果
+            for text, metadata_json, similarity in chunk_results:
+                try:
+                    metadata = _parse_metadata(metadata_json)
+                except:
+                    metadata = {}
+                
+                all_results.append({
+                    "content": text,
+                    "file_path": metadata.get("file_path", ""),
+                    "file_name": metadata.get("file_name", ""),
+                    "file_type": metadata.get("file_type", ""),
+                    "repo": metadata.get("repo", repo_name),
+                    "score": float(similarity) if similarity else 0.0,
+                })
+            
+            if not chunk_results:
+                logger.warning("两层搜索未返回结果，尝试降级到单层搜索")
+                fallback_results = _fallback_single_layer_search(query, repo_name, top_k, query_embedding)
+                all_results.extend(fallback_results)
+            
+        except psycopg2.Error as e:
+            # 表不存在（LLM 幻觉编造仓库名）是正常情况，降级为 WARNING
+            if "does not exist" in str(e):
+                logger.warning(f"仓库 '{repo_name}' 的索引表不存在（可能是 LLM 幻觉）")
+            else:
+                logger.error(f"Code index 数据库查询失败: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Code index 查询异常: {e}", exc_info=True)
+    
+    # 按分数排序，取前 top_k 个
+    all_results.sort(key=lambda x: x['score'], reverse=True)
+    formatted_results = all_results[:top_k]
+    
+    logger.info(f"跨仓库搜索完成，共返回 {len(formatted_results)} 个代码块（来自 {len(repos_to_search)} 个仓库）")
+    return formatted_results
 
 
 def _fallback_single_layer_search(query: str, repo_name: str, top_k: int, query_embedding: list) -> list[dict]:
