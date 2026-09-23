@@ -63,8 +63,6 @@ flask_chat/
 ├── .env.example                       # 环境变量模板
 ├── Dockerfile                         # Docker 镜像构建
 ├── docker-compose.yml                 # Docker Compose 编排
-├── docs/
-│   └── api.md                         # API 文档
 ├── tests/                             # 单元测试 & 集成测试
 │   ├── conftest.py                    # pytest 配置和 fixtures
 │   ├── test_utils.py                  # 工具函数测试
@@ -72,13 +70,6 @@ flask_chat/
 │   └── test_chat_api.py              # API 集成测试
 ├── scripts/
 │   └── diagnose_index.py             # 索引诊断脚本
-├── migrations/                        # 数据库迁移脚本（按日期命名）
-│   ├── 2026-09-11_add_advanced_features.sql
-│   ├── 2026-09-11_add_memory_fields.sql
-│   ├── 2026-09-11_add_feedback_field.sql
-│   ├── 2026-09-17_add_code_repositories.sql
-│   ├── 2026-09-17_add_progress_fields.sql
-│   └── 2026-09-18_incremental_index.sql
 └── app/
     ├── __init__.py                    # 应用工厂（create_app + 启动清理 + 扩展初始化）
     ├── config.py                      # 配置类
