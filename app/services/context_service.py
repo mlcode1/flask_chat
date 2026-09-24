@@ -81,10 +81,14 @@ class ContextService:
         return context
 
     def _build_system_context(self, conversation):
-        """构建系统上下文：系统提示 + 摘要 + 长期记忆"""
+        """构建系统上下文：对话模板系统提示 + 工具状态 + 摘要 + 长期记忆"""
         parts = []
         
-        # 1. 添加工具状态提示（动态告知 LLM 当前可用的功能）
+        # 1. 优先使用对话模板的系统提示词
+        if conversation.system_prompt:
+            parts.append(conversation.system_prompt)
+        
+        # 2. 添加工具状态提示（动态告知 LLM 当前可用的功能）
         from flask import current_app
         knowledge_enabled = current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False)
         code_index_enabled = current_app.config.get("CODE_INDEX_ENABLED", False)
@@ -98,11 +102,11 @@ class ContextService:
         if tool_status:
             parts.append(f"## 当前工具状态\n" + "\n".join(tool_status))
         
-        # 2. 加入长期记忆
+        # 3. 加入长期记忆
         if conversation.memory:
             parts.append(f"## 用户信息（长期记忆）\n{conversation.memory}")
         
-        # 3. 加入对话摘要
+        # 4. 加入对话摘要
         if conversation.summary:
             parts.append(f"## 对话历史摘要\n{conversation.summary}")
         

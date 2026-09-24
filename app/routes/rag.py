@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from app.services import rag_service
+from app.services.auth_service import get_current_user
 
 rag_bp = Blueprint("rag", __name__)
 
@@ -17,7 +18,8 @@ def upload_document():
         return jsonify({"error": f"不支持的文件类型，支持: {', '.join(rag_service.ALLOWED_EXTENSIONS)}"}), 400
 
     try:
-        doc = rag_service.process_and_store(file)
+        user = get_current_user()
+        doc = rag_service.process_and_store(file, user_id=user.id if user else None)
         return jsonify({
             "id": doc.id,
             "filename": doc.filename,
@@ -32,13 +34,15 @@ def upload_document():
 
 @rag_bp.route("/api/documents")
 def list_documents():
-    docs = rag_service.list_documents()
+    user = get_current_user()
+    docs = rag_service.list_documents(user_id=user.id if user else None)
     return jsonify(docs)
 
 
 @rag_bp.route("/api/documents/<int:doc_id>", methods=["DELETE"])
 def delete_document(doc_id):
-    if rag_service.delete_document(doc_id):
+    user = get_current_user()
+    if rag_service.delete_document(doc_id, user_id=user.id if user else None):
         return jsonify({"status": "deleted"})
     return jsonify({"error": "文档不存在"}), 404
 
@@ -50,6 +54,8 @@ def search_documents():
     if not query:
         return jsonify({"error": "搜索内容不能为空"}), 400
 
+    user = get_current_user()
+    user_id = user.id if user else None
     top_k = data.get("top_k", current_app.config["RAG_TOP_K"])
-    results = rag_service.search(query, top_k=top_k)
+    results = rag_service.search(query, top_k=top_k, user_id=user_id)
     return jsonify(results)

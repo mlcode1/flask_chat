@@ -8,10 +8,15 @@ load_dotenv()
 
 from app.config import Config
 from app.extensions import db
-from app.models import CodeRepository, IndexedFile, Message  # 导入新模型
+from app.models import CodeRepository, IndexedFile, Message, User, ConversationTemplate
 from app.routes.chat import chat_bp
 from app.routes.rag import rag_bp
 from app.routes.code_index import code_index_bp
+from app.routes.auth import auth_bp
+from app.routes.template import template_bp
+from app.routes.webhook import webhook_bp
+from app.routes.agent import agent_bp
+from app.routes.speech import speech_bp
 from app.errors import register_error_handlers
 from app.services.cache_service import init_cache_service
 from app.logging_config import setup_logging, log_request_start, log_request_end
@@ -37,6 +42,11 @@ def create_app():
     app.register_blueprint(chat_bp)
     app.register_blueprint(rag_bp)
     app.register_blueprint(code_index_bp)
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(template_bp)
+    app.register_blueprint(webhook_bp)
+    app.register_blueprint(agent_bp)
+    app.register_blueprint(speech_bp)
     
     # 注册请求追踪钩子
     @app.before_request
@@ -101,6 +111,10 @@ def create_app():
 
         # 初始化缓存服务
         init_cache_service()
+
+        # 创建默认对话模板
+        from app.services.template_service import create_default_templates
+        create_default_templates()
 
     # 初始化 SocketIO
     socketio.init_app(

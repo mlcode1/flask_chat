@@ -1,16 +1,58 @@
 from datetime import datetime, timezone
+from werkzeug.security import generate_password_hash, check_password_hash
 from app.extensions import db
 from app.config import Config
 from pgvector.sqlalchemy import Vector
+
+
+class User(db.Model):
+    """用户模型"""
+    __tablename__ = "users"
+
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False, index=True)
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(256), nullable=False)
+    is_active = db.Column(db.Boolean, default=True)
+    is_admin = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    last_login = db.Column(db.DateTime, nullable=True)
+
+    # 关系
+    conversations = db.relationship("Conversation", backref="user", lazy="dynamic", cascade="all, delete-orphan")
+    documents = db.relationship("Document", backref="user", lazy="dynamic", cascade="all, delete-orphan")
+    code_repositories = db.relationship("CodeRepository", backref="user", lazy="dynamic", cascade="all, delete-orphan")
+
+    def set_password(self, password):
+        """设置密码（哈希存储）"""
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        """验证密码"""
+        return check_password_hash(self.password_hash, password)
+
+    def to_dict(self):
+        """序列化为字典"""
+        return {
+            "id": self.id,
+            "username": self.username,
+            "email": self.email,
+            "is_active": self.is_active,
+            "is_admin": self.is_admin,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "last_login": self.last_login.isoformat() if self.last_login else None,
+        }
 
 
 class Conversation(db.Model):
     __tablename__ = "conversations"
 
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)  # 多用户支持
     title = db.Column(db.String(255), default="新对话")
     summary = db.Column(db.Text, default="")
     memory = db.Column(db.Text, default="")
+    system_prompt = db.Column(db.Text, default="")  # 对话模板系统提示词
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -65,6 +107,7 @@ class Document(db.Model):
     __tablename__ = "documents"
 
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)  # 多用户支持
     filename = db.Column(db.String(500), nullable=False)
     file_type = db.Column(db.String(20), nullable=False)
     file_size = db.Column(db.Integer, nullable=False)
@@ -124,6 +167,7 @@ class CodeRepository(db.Model):
     __tablename__ = "code_repositories"
 
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)  # 多用户支持
     name = db.Column(db.String(100), unique=True, nullable=False, index=True)  # 仓库别名（如 flask_chat）
     path = db.Column(db.String(500), nullable=False)            # 本地路径（绝对路径）
     status = db.Column(db.String(20), default="pending")        # pending/indexing/indexed/failed

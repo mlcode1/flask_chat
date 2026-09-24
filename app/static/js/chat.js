@@ -14,7 +14,16 @@
     const codeIndexSwitch = document.getElementById("code-index-switch");
     const shareBtn = document.getElementById("share-btn");
     const exportBtn = document.getElementById("export-btn");
+    const logoutBtn = document.getElementById("logout-btn");
     const codeRepoList = document.getElementById("code-repo-list");
+
+    // 登出按钮
+    if (logoutBtn) {
+        logoutBtn.addEventListener("click", () => {
+            localStorage.removeItem("token");
+            window.location.href = "/";
+        });
+    }
 
     // 判断当前页面类型
     const isChatPage = !!messagesContainer;
@@ -23,6 +32,7 @@
     let currentConvId = null;
     let isStreaming = false;
     let verifyEnabled = false;
+    let agentModeEnabled = false;
     
     // ========== Socket.IO 连接 ==========
     let socket = null;
@@ -31,15 +41,32 @@
     let fullContent = "";         // 累积的完整内容
     let toolCalls = [];           // 工具调用记录
     
-    // 初始化 Socket.IO 连接
+    // 获取认证 token
+    function getAuthToken() {
+        return localStorage.getItem('token');
+    }
+    
+    // 带认证的 fetch 封装
+    function authFetch(url, options = {}) {
+        const token = getAuthToken();
+        if (token) {
+            options.headers = options.headers || {};
+            options.headers['Authorization'] = `Bearer ${token}`;
+        }
+        return fetch(url, options);
+    }
+    
+    // 初始化 Socket.IO 连接（带认证）
     function initSocket() {
         if (socket) return;  // 已连接
         
+        const token = getAuthToken();
         socket = io({
             transports: ['websocket'],
             reconnection: true,
             reconnectionDelay: 1000,
-            reconnectionAttempts: 5
+            reconnectionAttempts: 5,
+            auth: token ? { token } : {}
         });
         
         // 连接成功
@@ -227,7 +254,7 @@
 
     async function loadModels() {
         try {
-            const res = await fetch("/api/models");
+            const res = await authFetch("/api/models");
             const data = await res.json();
             modelSelector.innerHTML = "";
             data.models.forEach(m => {
@@ -245,7 +272,7 @@
     async function loadVerifyConfig() {
         if (!verifySwitch) return;
         try {
-            const res = await fetch("/api/config/verify");
+            const res = await authFetch("/api/config/verify");
             const data = await res.json();
             verifyEnabled = data.enabled;
             verifySwitch.checked = verifyEnabled;
@@ -257,7 +284,7 @@
     async function loadToolsConfig() {
         if (!knowledgeSearchSwitch && !codeIndexSwitch) return;
         try {
-            const res = await fetch("/api/config/tools");
+            const res = await authFetch("/api/config/tools");
             const data = await res.json();
             if (knowledgeSearchSwitch) knowledgeSearchSwitch.checked = data.knowledge_search;
             if (codeIndexSwitch) codeIndexSwitch.checked = data.code_index;
@@ -269,7 +296,7 @@
     if (knowledgeSearchSwitch) {
         knowledgeSearchSwitch.addEventListener("change", async function() {
             try {
-                await fetch("/api/config/tools", {
+                await authFetch("/api/config/tools", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ knowledge_search: this.checked })
@@ -284,7 +311,7 @@
     if (codeIndexSwitch) {
         codeIndexSwitch.addEventListener("change", async function() {
             try {
-                await fetch("/api/config/tools", {
+                await authFetch("/api/config/tools", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ code_index: this.checked })
@@ -300,7 +327,7 @@
         verifySwitch.addEventListener("change", async function() {
             verifyEnabled = this.checked;
             try {
-                await fetch("/api/config/verify", {
+                await authFetch("/api/config/verify", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ enabled: verifyEnabled })
@@ -379,7 +406,7 @@
     // 提交反馈
     async function submitFeedback(messageId, feedback, btn) {
         try {
-            const res = await fetch(`/api/messages/${messageId}/feedback`, {
+            const res = await authFetch(`/api/messages/${messageId}/feedback`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ feedback })
@@ -515,7 +542,7 @@
     
     async function loadDebugInfo() {
         try {
-            const res = await fetch("/api/health");
+            const res = await authFetch("/api/health");
             const data = await res.json();
             
             const systemInfo = document.getElementById("debug-system-info");
@@ -542,7 +569,7 @@
             const tokenStatsEl = document.getElementById("debug-token-stats");
             if (currentConvId) {
                 try {
-                    const statsRes = await fetch(`/api/conversations/${currentConvId}/stats`);
+                    const statsRes = await authFetch(`/api/conversations/${currentConvId}/stats`);
                     const stats = await statsRes.json();
                     tokenStatsEl.innerHTML = `
                         <div class="token-stat-row"><span>总消息数</span><span>${stats.total_messages}</span></div>
@@ -639,7 +666,7 @@
         bubble.appendChild(indicator);
 
         try {
-            const res = await fetch(`/api/conversations/${currentConvId}/messages/${messageId}/verify`, {
+            const res = await authFetch(`/api/conversations/${currentConvId}/messages/${messageId}/verify`, {
                 method: "POST"
             });
             const verification = await res.json();
@@ -688,7 +715,7 @@
         currentConvId = convId;
         
         try {
-            const res = await fetch(`/api/conversations/${convId}/messages`);
+            const res = await authFetch(`/api/conversations/${convId}/messages`);
             const data = await res.json();
             // 兼容分页格式：{messages: [...], has_more: bool} 和旧的直接返回数组
             const messages = Array.isArray(data) ? data : (data.messages || []);
@@ -720,12 +747,249 @@
         }
     }
 
+    // 对话模板选择
+    async function showTemplateSelector() {
+        try {
+            const res = await authFetch("/api/templates");
+            const data = await res.json();
+            const templates = data.templates || [];
+            
+            if (templates.length === 0) {
+                createNewConversation();
+                return;
+            }
+            
+            // 模板图标映射
+            const iconMap = {
+                '代码审查助手': '🔍',
+                '知识库问答': '📚',
+                '技术架构顾问': '🏗️',
+                'SQL 分析师': '📊',
+                '学习导师': '🎓'
+            };
+            
+            // 创建模板选择弹窗
+            const modal = document.createElement("div");
+            modal.className = "modal-overlay";
+            modal.style.cssText = "backdrop-filter: blur(4px);";
+            
+            const templateCards = templates.map(t => {
+                const icon = iconMap[t.name] || '💬';
+                return `
+                    <div class="template-card" data-id="${t.id}" style="
+                        padding: 16px;
+                        border: 1px solid var(--border-color);
+                        border-radius: 8px;
+                        cursor: pointer;
+                        transition: all 0.2s;
+                        background: var(--bg-primary);
+                    " onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)'; this.style.borderColor='var(--accent-color)'"
+                       onmouseout="this.style.transform=''; this.style.boxShadow=''; this.style.borderColor='var(--border-color)'">
+                        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
+                            <span style="font-size: 28px;">${icon}</span>
+                            <div style="flex: 1;">
+                                <div style="font-weight: 600; font-size: 15px; color: var(--text-primary);">${t.name}</div>
+                            </div>
+                        </div>
+                        <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.5; padding-left: 40px;">
+                            ${t.description || '通用对话模板'}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            
+            modal.innerHTML = `
+                <div class="modal-box" style="
+                    max-width: 560px;
+                    width: 90%;
+                    padding: 28px;
+                    border-radius: 12px;
+                    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                ">
+                    <div style="margin-bottom: 24px;">
+                        <div style="font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px;">
+                            选择对话模板
+                        </div>
+                        <div style="font-size: 14px; color: var(--text-secondary);">
+                            选择一个预设模板开始对话，或从空白对话开始
+                        </div>
+                    </div>
+                    
+                    <div class="template-grid" style="
+                        display: grid;
+                        grid-template-columns: repeat(2, 1fr);
+                        gap: 12px;
+                        margin-bottom: 20px;
+                        max-height: 400px;
+                        overflow-y: auto;
+                    ">
+                        <div class="template-card" data-id="" style="
+                            padding: 16px;
+                            border: 1px solid var(--border-color);
+                            border-radius: 8px;
+                            cursor: pointer;
+                            transition: all 0.2s;
+                            background: var(--bg-primary);
+                        " onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)'; this.style.borderColor='var(--accent-color)'"
+                           onmouseout="this.style.transform=''; this.style.boxShadow=''; this.style.borderColor='var(--border-color)'">
+                            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
+                                <span style="font-size: 28px;">💬</span>
+                                <div style="flex: 1;">
+                                    <div style="font-weight: 600; font-size: 15px; color: var(--text-primary);">空白对话</div>
+                                </div>
+                            </div>
+                            <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.5; padding-left: 40px;">
+                                不预设系统提示词
+                            </div>
+                        </div>
+                        ${templateCards}
+                    </div>
+                    
+                    <div style="display: flex; justify-content: flex-end;">
+                        <button class="modal-btn modal-cancel" style="
+                            padding: 8px 20px;
+                            border-radius: 6px;
+                            font-size: 14px;
+                        ">取消</button>
+                    </div>
+                </div>
+            `;
+            
+            document.body.appendChild(modal);
+            
+            modal.querySelectorAll('.template-card').forEach(item => {
+                item.addEventListener('click', () => {
+                    const templateId = item.dataset.id || null;
+                    modal.remove();
+                    createNewConversation(templateId);
+                });
+            });
+            
+            modal.querySelector('.modal-cancel').addEventListener('click', () => {
+                modal.remove();
+            });
+            
+            // 点击遮罩层关闭
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    modal.remove();
+                }
+            });
+        } catch (e) {
+            console.error("加载模板失败:", e);
+            createNewConversation();
+        }
+    }
+    
+    // 弹窗让用户输入新对话标题；返回 null 表示取消，空字符串表示用默认
+    function promptForTitle() {
+        return new Promise((resolve) => {
+            const overlay = document.createElement("div");
+            overlay.className = "modal-overlay";
+
+            const box = document.createElement("div");
+            box.className = "modal-box";
+            box.innerHTML = `
+                <div class="modal-title">新建对话</div>
+                <input type="text" class="modal-input" placeholder="输入对话标题（留空则自动生成）" maxlength="50" />
+                <div class="modal-actions">
+                    <button class="modal-btn modal-cancel">取消</button>
+                    <button class="modal-btn modal-confirm">创建</button>
+                </div>
+            `;
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+
+            const input = box.querySelector(".modal-input");
+            const cancelBtn = box.querySelector(".modal-cancel");
+            const confirmBtn = box.querySelector(".modal-confirm");
+
+            input.focus();
+
+            const close = (val) => {
+                overlay.remove();
+                resolve(val);
+            };
+
+            cancelBtn.addEventListener("click", () => close(null));
+            overlay.addEventListener("click", (e) => { if (e.target === overlay) close(null); });
+            input.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") close(input.value);
+                else if (e.key === "Escape") close(null);
+            });
+            confirmBtn.addEventListener("click", () => close(input.value));
+        });
+    }
+    
+    async function createNewConversation(templateId = null) {
+        // 先让用户输入标题
+        const title = await promptForTitle();
+        if (title === null) return; // 用户取消
+        
+        const body = {};
+        if (title) body.title = title;
+        if (templateId) body.template_id = templateId;
+        
+        const res = await authFetch("/api/conversations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const conv = await res.json();
+        currentConvId = conv.id;
+        addConvToSidebar(conv.id, conv.title);
+        
+        messagesContainer.innerHTML = "";
+        addMessage("assistant", conv.welcome_message || "你好！我是AI智能助手，有什么可以帮你的吗？");
+        
+        messageInput.focus();
+        loadMessages(conv.id);
+    }
+    
+    // 修改 newChatBtn 点击事件
+    if (newChatBtn) {
+        newChatBtn.removeEventListener('click', handleNewChatClick);
+        newChatBtn.addEventListener('click', showTemplateSelector);
+    }
+    
+    function handleNewChatClick() {
+        showTemplateSelector();
+    }
+    
     async function sendMessage() {
         const content = messageInput.value.trim();
         if (!content || isStreaming) return;
 
+        // Agent 模式：调用 Agent API
+        if (agentModeEnabled) {
+            // 创建对话（如果还没有）
+            if (!currentConvId) {
+                const res = await authFetch("/api/conversations", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({}),
+                });
+                const conv = await res.json();
+                currentConvId = conv.id;
+                addConvToSidebar(conv.id, conv.title);
+            }
+            
+            addMessage("user", content);
+            messageInput.value = "";
+            messageInput.style.height = "auto";
+            
+            // 调用 Agent API（在 isChatPage 块内定义，需要延迟调用）
+            if (window.sendAgentMessage) {
+                window.sendAgentMessage(content);
+            } else {
+                console.error('sendAgentMessage 未定义');
+                addMessage('assistant', '错误：Agent 功能不可用');
+            }
+            return;
+        }
+
         if (!currentConvId) {
-            const res = await fetch("/api/conversations", {
+            const res = await authFetch("/api/conversations", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({}),
@@ -769,7 +1033,7 @@
         setTimeout(() => {
             if (!currentMessageId && currentBubble) {
                 console.log('[WS] message_created 超时，轮询获取消息 ID');
-                fetch(`/api/conversations/${currentConvId}/messages`)
+                authFetch(`/api/conversations/${currentConvId}/messages`)
                     .then(res => res.json())
                     .then(data => {
                         const msgs = Array.isArray(data) ? data : (data.messages || []);
@@ -837,7 +1101,7 @@
             delBtn.addEventListener("click", async function (e) {
                 e.stopPropagation();
                 const id = this.dataset.id;
-                await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+                await authFetch(`/api/conversations/${id}`, { method: "DELETE" });
                 item.remove();
                 if (currentConvId === id) {
                     const first = convList.querySelector(".conversation-item");
@@ -897,7 +1161,7 @@
     // 调用后端重命名接口
     async function renameConversation(id, title, titleEl) {
         try {
-            const res = await fetch(`/api/conversations/${id}`, {
+            const res = await authFetch(`/api/conversations/${id}`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ title }),
@@ -917,64 +1181,6 @@
 
     // ========== 聊天页专用功能 ==========
     if (isChatPage) {
-        newChatBtn.addEventListener("click", async function () {
-            const title = await promptForTitle();
-            if (title === null) return; // 用户取消
-
-            const res = await fetch("/api/conversations", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(title ? { title } : {}),
-            });
-            const conv = await res.json();
-            addConvToSidebar(conv.id, conv.title);
-            currentConvId = conv.id;
-            messagesContainer.innerHTML = `
-                <div class="welcome-message">
-                    <p>你好！我是AI智能助手，有什么可以帮你的吗？</p>
-                    <p class="hint">支持工具调用 · 流式输出 · 上下文压缩 · RAG知识检索</p>
-                </div>`;
-        });
-
-        // 弹窗让用户输入新对话标题；返回 null 表示取消，空字符串表示用默认
-        function promptForTitle() {
-            return new Promise((resolve) => {
-                const overlay = document.createElement("div");
-                overlay.className = "modal-overlay";
-
-                const box = document.createElement("div");
-                box.className = "modal-box";
-                box.innerHTML = `
-                    <div class="modal-title">新建对话</div>
-                    <input type="text" class="modal-input" placeholder="输入对话标题（留空则自动生成）" maxlength="50" />
-                    <div class="modal-actions">
-                        <button class="modal-btn modal-cancel">取消</button>
-                        <button class="modal-btn modal-confirm">创建</button>
-                    </div>
-                `;
-                overlay.appendChild(box);
-                document.body.appendChild(overlay);
-
-                const input = box.querySelector(".modal-input");
-                const cancelBtn = box.querySelector(".modal-cancel");
-                const confirmBtn = box.querySelector(".modal-confirm");
-
-                input.focus();
-
-                const close = (val) => {
-                    overlay.remove();
-                    resolve(val);
-                };
-
-                cancelBtn.addEventListener("click", () => close(null));
-                overlay.addEventListener("click", (e) => { if (e.target === overlay) close(null); });
-                input.addEventListener("keydown", (e) => {
-                    if (e.key === "Enter") close(input.value);
-                    else if (e.key === "Escape") close(null);
-                });
-                confirmBtn.addEventListener("click", () => close(input.value));
-            });
-        }
 
         shareBtn.addEventListener("click", async function () {
             if (!currentConvId) {
@@ -982,7 +1188,7 @@
                 return;
             }
             try {
-                const res = await fetch(`/api/conversations/${currentConvId}/share`, { method: "POST" });
+                const res = await authFetch(`/api/conversations/${currentConvId}/share`, { method: "POST" });
                 const data = await res.json();
                 if (data.error) {
                     alert(data.error);
@@ -1041,7 +1247,7 @@
                 btn.addEventListener("click", async function () {
                     const format = this.dataset.format;
                     try {
-                        const res = await fetch(`/api/conversations/${currentConvId}/export?format=${format}`);
+                        const res = await authFetch(`/api/conversations/${currentConvId}/export?format=${format}`);
                         if (!res.ok) throw new Error("导出失败");
                         const blob = await res.blob();
                         const url = URL.createObjectURL(blob);
@@ -1069,6 +1275,200 @@
 
         sendBtn.addEventListener("click", sendMessage);
         interruptBtn.addEventListener("click", interrupt);
+
+        // ========== Agent 模式 ==========
+        const agentModeBtn = document.getElementById('agent-mode-btn');
+        const agentStatus = document.getElementById('agent-status');
+        const agentSteps = document.getElementById('agent-steps');
+        
+        if (agentModeBtn) {
+            agentModeBtn.addEventListener('click', () => {
+                agentModeEnabled = !agentModeEnabled;
+                agentModeBtn.classList.toggle('active', agentModeEnabled);
+                console.log('Agent 模式:', agentModeEnabled ? '开启' : '关闭');
+            });
+        }
+        
+        // 暴露 sendAgentMessage 到 window，供 sendMessage() 调用
+        window.sendAgentMessage = async function(userMessage) {
+            if (!agentStatus || !agentSteps) return;
+            
+            agentStatus.style.display = 'block';
+            agentSteps.innerHTML = '<div class="agent-step thinking">⏳ Agent 正在思考...</div>';
+            
+            // 进度动画：定时更新提示文字
+            let elapsedSeconds = 0;
+            let isWaiting = true;
+            const progressMessages = [
+                '🔍 分析任务中...',
+                '🧠 推理思考中...',
+                '🔧 准备调用工具...',
+                '📊 整理结果中...',
+                '✍️ 生成最终答案...',
+            ];
+            const progressTimer = setInterval(() => {
+                if (!isWaiting) return;
+                elapsedSeconds++;
+                const msgIndex = Math.min(Math.floor(elapsedSeconds / 3), progressMessages.length - 1);
+                const currentMsg = agentSteps.querySelector('.agent-step');
+                if (currentMsg) {
+                    currentMsg.innerHTML = `${progressMessages[msgIndex]} <span style="color: var(--text-secondary); font-size: 12px;">(已耗时 ${elapsedSeconds}秒)</span>`;
+                }
+            }, 1000);
+            
+            try {
+                const res = await authFetch('/api/agent/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ task: userMessage })
+                });
+                
+                isWaiting = false;
+                clearInterval(progressTimer);
+                const data = await res.json();
+                
+                if (data.error) {
+                    agentSteps.innerHTML = `<div class="agent-step response">❌ 错误: ${data.error}</div>`;
+                    setTimeout(() => { agentStatus.style.display = 'none'; }, 3000);
+                    return;
+                }
+                
+                // 渲染执行步骤
+                agentSteps.innerHTML = '';
+                data.steps.forEach(step => {
+                    const stepDiv = document.createElement('div');
+                    stepDiv.className = `agent-step ${step.step_type}`;
+                    
+                    if (step.step_type === 'thinking') {
+                        stepDiv.textContent = `💭 ${step.content}`;
+                    } else if (step.step_type === 'tool_call') {
+                        stepDiv.innerHTML = `🔧 调用 ${step.tool_name}<br><small>结果: ${(step.tool_result || '无').substring(0, 200)}</small>`;
+                    } else if (step.step_type === 'response') {
+                        stepDiv.textContent = `✅ ${step.content}`;
+                    }
+                    
+                    agentSteps.appendChild(stepDiv);
+                });
+                
+                // 将最终答案添加到对话并保存到数据库（用户消息 + Agent 回复一起保存）
+                if (data.final_answer) {
+                    setTimeout(async () => {
+                        agentStatus.style.display = 'none';
+                        
+                        // 通过 REST API 同时保存用户消息和 Agent 回复
+                        await authFetch(`/api/agent/save-response`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                conversation_id: currentConvId,
+                                user_message: userMessage,
+                                agent_response: data.final_answer
+                            })
+                        });
+                        
+                        addMessage('assistant', data.final_answer);
+                    }, 500);
+                }
+                
+            } catch (error) {
+                clearInterval(progressTimer);
+                console.error('Agent 执行失败:', error);
+                agentSteps.innerHTML = '<div class="agent-step response">❌ 执行失败，请重试</div>';
+                setTimeout(() => { agentStatus.style.display = 'none'; }, 3000);
+            }
+        };
+
+        // ========== 语音输入功能 ==========
+        const voiceBtn = document.getElementById('voice-btn');
+        const voiceStatus = document.getElementById('voice-status');
+        
+        if (voiceBtn && voiceStatus) {
+            // 检查浏览器是否支持语音识别
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            
+            if (SpeechRecognition) {
+                const recognition = new SpeechRecognition();
+                recognition.lang = 'zh-CN';
+                recognition.continuous = false;
+                recognition.interimResults = false;
+                
+                let isListening = false;
+                
+                voiceBtn.addEventListener('click', () => {
+                    if (!isListening) {
+                        try {
+                            recognition.start();
+                            isListening = true;
+                            voiceBtn.classList.add('recording');
+                            voiceStatus.style.display = 'flex';
+                            voiceStatus.innerHTML = '<span class="voice-indicator"></span><span>正在聆听...</span>';
+                        } catch (error) {
+                            console.error('语音识别启动失败:', error);
+                            voiceStatus.style.display = 'flex';
+                            voiceStatus.innerHTML = '<span>语音识别启动失败</span>';
+                            setTimeout(() => {
+                                voiceStatus.style.display = 'none';
+                            }, 3000);
+                        }
+                    } else {
+                        recognition.stop();
+                        isListening = false;
+                        voiceBtn.classList.remove('recording');
+                        voiceStatus.style.display = 'none';
+                    }
+                });
+                
+                recognition.onresult = (event) => {
+                    const transcript = event.results[0][0].transcript;
+                    // 将识别结果添加到输入框
+                    const currentValue = messageInput.value.trim();
+                    messageInput.value = currentValue ? (currentValue + ' ' + transcript) : transcript;
+                    
+                    // 自动调整输入框高度
+                    messageInput.style.height = 'auto';
+                    messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+                    
+                    // 显示成功提示
+                    voiceStatus.innerHTML = '<span>✓ 识别成功</span>';
+                    setTimeout(() => {
+                        voiceStatus.style.display = 'none';
+                    }, 1500);
+                };
+                
+                recognition.onend = () => {
+                    isListening = false;
+                    voiceBtn.classList.remove('recording');
+                    setTimeout(() => {
+                        voiceStatus.style.display = 'none';
+                    }, 500);
+                };
+                
+                recognition.onerror = (event) => {
+                    console.error('语音识别错误:', event.error);
+                    isListening = false;
+                    voiceBtn.classList.remove('recording');
+                    
+                    let errorMsg = '语音识别失败';
+                    if (event.error === 'not-allowed') {
+                        errorMsg = '请允许麦克风权限';
+                    } else if (event.error === 'no-speech') {
+                        errorMsg = '未检测到语音';
+                    } else if (event.error === 'network') {
+                        errorMsg = '网络错误，请检查网络连接';
+                    }
+                    
+                    voiceStatus.style.display = 'flex';
+                    voiceStatus.innerHTML = `<span>${errorMsg}</span>`;
+                    setTimeout(() => {
+                        voiceStatus.style.display = 'none';
+                    }, 3000);
+                };
+            } else {
+                // 浏览器不支持语音识别，隐藏按钮
+                voiceBtn.style.display = 'none';
+                console.warn('当前浏览器不支持语音识别');
+            }
+        }
 
         messageInput.addEventListener("keydown", function (e) {
             // 忽略 IME 输入法组合过程中的回车（如中文输入法确认拼音转英文）
@@ -1101,7 +1501,7 @@
 
     async function loadDocuments() {
         try {
-            const res = await fetch("/api/documents");
+            const res = await authFetch("/api/documents");
             const docs = await res.json();
             renderDocuments(docs);
         } catch (e) {
@@ -1130,7 +1530,7 @@
             `;
             const delBtn = item.querySelector(".kb-doc-delete");
             delBtn.addEventListener("click", async () => {
-                await fetch(`/api/documents/${doc.id}`, { method: "DELETE" });
+                await authFetch(`/api/documents/${doc.id}`, { method: "DELETE" });
                 loadDocuments();
             });
             kbDocList.appendChild(item);
@@ -1154,7 +1554,7 @@
             formData.append("file", file);
 
             try {
-                const res = await fetch("/api/documents/upload", {
+                const res = await authFetch("/api/documents/upload", {
                     method: "POST",
                     body: formData,
                 });
@@ -1267,7 +1667,7 @@
     // 加载代码库列表
     async function loadCodeRepos() {
         try {
-            const res = await fetch("/api/code-repos");
+            const res = await authFetch("/api/code-repos");
             const data = await res.json();
             
             if (data.status === "success" && data.repos.length > 0) {
@@ -1355,7 +1755,7 @@
         
         progressPollingIntervals[repoId] = setInterval(async () => {
             try {
-                const res = await fetch(`/api/code-repos/${repoId}/progress`);
+                const res = await authFetch(`/api/code-repos/${repoId}/progress`);
                 const data = await res.json();
                 
                 if (data.status === 'success') {
@@ -1491,7 +1891,7 @@
             }
 
             try {
-                const res = await fetch('/api/code-repos', {
+                const res = await authFetch('/api/code-repos', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name, path })
@@ -1517,7 +1917,7 @@
     // 触发索引
     async function triggerIndex(repoId, mode = 'full', reindex = true) {
         try {
-            const res = await fetch(`/api/code-repos/${repoId}/index`, {
+            const res = await authFetch(`/api/code-repos/${repoId}/index`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode, reindex })
@@ -1541,7 +1941,7 @@
     // 删除仓库
     async function deleteRepo(repoId) {
         try {
-            const res = await fetch(`/api/code-repos/${repoId}`, {
+            const res = await authFetch(`/api/code-repos/${repoId}`, {
                 method: 'DELETE'
             });
             const data = await res.json();
@@ -1560,7 +1960,7 @@
     // 取消索引
     async function cancelIndex(repoId) {
         try {
-            const res = await fetch(`/api/code-repos/${repoId}/cancel`, {
+            const res = await authFetch(`/api/code-repos/${repoId}/cancel`, {
                 method: 'POST'
             });
             const data = await res.json();
@@ -1592,7 +1992,7 @@
             resultsDiv.innerHTML = '<div class="loading">搜索中...</div>';
 
             try {
-                const res = await fetch('/api/code-repos/test-search', {
+                const res = await authFetch('/api/code-repos/test-search', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1636,7 +2036,7 @@
     // 加载知识库文档数量（用于主页导航徽章）
     async function loadKnowledgeCount() {
         try {
-            const response = await fetch('/api/documents');
+            const response = await authFetch('/api/documents');
             const data = await response.json();
             // API 直接返回数组
             const count = Array.isArray(data) ? data.length : (data.documents ? data.documents.length : 0);
@@ -1652,7 +2052,7 @@
     // 加载代码库数量（用于主页导航徽章）
     async function loadCodeReposCount() {
         try {
-            const response = await fetch('/api/code-repos');
+            const response = await authFetch('/api/code-repos');
             const data = await response.json();
             const count = data.repos ? data.repos.length : 0;
             const badge = document.getElementById('code-repos-count');
@@ -1671,6 +2071,57 @@
     if (isChatPage) {
         loadKnowledgeCount();
         loadCodeReposCount();
+        
+        // 检查登录状态并加载对话列表
+        (async function initChat() {
+            const token = getAuthToken();
+            if (!token) {
+                window.location.href = "/login";
+                return;
+            }
+            
+            try {
+                const res = await authFetch("/api/conversations");
+                if (res.status === 401) {
+                    localStorage.removeItem("token");
+                    window.location.href = "/login";
+                    return;
+                }
+                
+                const conversations = await res.json();
+                if (Array.isArray(conversations)) {
+                    convList.innerHTML = "";
+                    conversations.forEach(conv => {
+                        const item = document.createElement("div");
+                        item.className = "conversation-item";
+                        item.dataset.id = conv.id;
+                        item.innerHTML = `
+                            <span class="conv-title">${conv.title}</span>
+                            <button class="rename-btn" data-id="${conv.id}" title="重命名">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"></path></svg>
+                            </button>
+                            <button class="delete-btn" data-id="${conv.id}">×</button>
+                        `;
+                        convList.appendChild(item);
+                        bindConvEvents(item);
+                    });
+                    
+                    // 加载第一个对话
+                    if (conversations.length > 0) {
+                        const firstItem = convList.querySelector(".conversation-item");
+                        if (firstItem) {
+                            firstItem.classList.add("active");
+                            currentConvId = firstItem.dataset.id;
+                            loadMessages(currentConvId);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error("加载对话列表失败:", error);
+                localStorage.removeItem("token");
+                window.location.href = "/login";
+            }
+        })();
     }
 
     // 暴露给其他页面使用

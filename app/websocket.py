@@ -20,20 +20,37 @@ logger = logging.getLogger(__name__)
 # 全局存储正在进行的生成任务
 _active_generations = {}  # {message_id: {thread, content, stop_event, status}}
 
+# 全局存储 WebSocket 连接的用户信息（sid -> user_id）
+_connected_users = {}
+
 
 def register_handlers(socketio, app):
     """注册 WebSocket 事件处理器"""
 
     @socketio.on('connect')
-    def handle_connect():
-        """客户端连接"""
-        logger.info(f"WebSocket 客户端已连接: {request.sid}")
-        emit('connected', {'status': 'connected', 'sid': request.sid})
+    def handle_connect(auth):
+        """客户端连接（支持 JWT 认证）"""
+        from app.services.auth_service import get_current_user_from_token
+        token = auth.get('token') if auth else None
+        user = get_current_user_from_token(token) if token else None
+        
+        if user:
+            logger.info(f"WebSocket 客户端已连接: {request.sid}, user: {user.username}")
+            # 存储用户信息
+            with app.app_context():
+                _connected_users[request.sid] = user.id
+            emit('connected', {'status': 'connected', 'sid': request.sid, 'user': user.username})
+        else:
+            logger.info(f"WebSocket 客户端已连接: {request.sid} (匿名)")
+            emit('connected', {'status': 'connected', 'sid': request.sid})
 
     @socketio.on('disconnect')
     def handle_disconnect():
         """客户端断开连接（后台生成继续）"""
         logger.info(f"WebSocket 客户端已断开: {request.sid}")
+        # 清理用户信息
+        with app.app_context():
+            _connected_users.pop(request.sid, None)
 
     @socketio.on('join')
     def handle_join(data):
@@ -158,11 +175,14 @@ def register_handlers(socketio, app):
             room = f"conv_{conv_id}"
             stop_event = threading.Event()
             
+            # 从全局连接字典中获取当前 WebSocket 连接的用户 ID（用于工具权限隔离）
+            user_id = _connected_users.get(request.sid)
+            
             # 使用 socketio.start_background_task 启动后台任务
             from app import socketio
             socketio.start_background_task(
                 generate_ai_response,
-                app, int(conv_id), msg_id, content, model, image_urls, room, stop_event
+                app, int(conv_id), msg_id, content, model, image_urls, room, stop_event, user_id
             )
 
             # 记录生成任务
@@ -186,7 +206,7 @@ def register_handlers(socketio, app):
             logger.info(f"已请求停止生成: message_id={msg_id}")
 
 
-def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, room, stop_event):
+def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, room, stop_event, user_id=None):
     """后台生成 AI 回复（独立线程，前端断开不影响）"""
     with app.app_context():
         try:
@@ -250,13 +270,16 @@ def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, 
                 on_chunk=on_chunk,
                 on_tool_call=on_tool_call,
                 stop_event=stop_event,
-                conversation_id=conv_id
+                conversation_id=conv_id,
+                user_id=user_id
             ):
                 if stop_event.is_set():
                     break
                 _send_token(room, msg_id, token)
 
             # 4. 统一处理完成/停止（所有数据库操作和事件通知都在这里）
+            logger.info(f"生成结束: message_id={msg_id}, full_content_len={len(full_content)}, stopped={stop_event.is_set()}")
+            
             if stop_event.is_set():
                 final_content = full_content or '[已停止]'
                 _finish_generation(msg_id, final_content, room, tool_calls_log,
@@ -277,6 +300,7 @@ def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, 
 
         except Exception as e:
             logger.error(f"生成失败: {e}", exc_info=True)
+            # 生成出错时也要更新数据库状态，避免一直停留在 generating
             _error_generation(msg_id, str(e), room)
 
 
@@ -293,6 +317,7 @@ def _finish_generation(msg_id, content, room, tool_calls_log, interrupted=False,
 
     # 保存到数据库
     try:
+        logger.info(f"保存生成结果: message_id={msg_id}, content_len={len(content)}, status={status}")
         msg = db.session.get(Message, msg_id)
         if msg:
             msg.content = content
@@ -302,13 +327,16 @@ def _finish_generation(msg_id, content, room, tool_calls_log, interrupted=False,
             ai = AIService()
             msg.token_count = ai.estimate_tokens(content)
             db.session.commit()
+            logger.info(f"生成结果已保存到数据库: message_id={msg_id}")
 
             conv = db.session.get(Conversation, msg.conversation_id)
             if conv:
                 conv.updated_at = db.func.now()
                 db.session.commit()
+        else:
+            logger.error(f"消息不存在: message_id={msg_id}")
     except Exception as e:
-        logger.error(f"保存生成结果失败: {e}")
+        logger.error(f"保存生成结果失败: {e}", exc_info=True)
         db.session.rollback()
 
     # 结果验证（仅正常完成时）
@@ -358,6 +386,13 @@ def _finish_generation(msg_id, content, room, tool_calls_log, interrupted=False,
             'message_id': msg_id,
             'content': content
         }, room=room)
+        
+        # Trigger webhook notification if configured
+        try:
+            from app.services.webhook_service import fire_webhook
+            fire_webhook('conversation.completed', msg_id)
+        except Exception as webhook_err:
+            logger.warning(f"Webhook notification failed: {webhook_err}")
 
     # 延迟清理全局状态（给客户端时间接收事件）
     def cleanup():

@@ -56,7 +56,7 @@ class AIService:
         raise last_exception
 
     @traceable(name="chat_stream_response", run_type="llm")
-    def stream_response(self, messages, on_chunk=None, on_tool_call=None, stop_event=None, on_confirm_request=None, conversation_id=None):
+    def stream_response(self, messages, on_chunk=None, on_tool_call=None, stop_event=None, on_confirm_request=None, conversation_id=None, user_id=None):
         full_content = ""
         tool_calls_accumulator = {}
 
@@ -66,7 +66,7 @@ class AIService:
                 return
 
             has_tool_calls = False
-            tools = get_tools()
+            tools = get_tools(user_id)
             
             # 带重试的 API 调用
             def call_api():
@@ -183,7 +183,7 @@ class AIService:
                         continue
                 
                 # 执行工具
-                result = execute_tool(tool_name, tool_args)
+                result = execute_tool(tool_name, tool_args, user_id=user_id)
                 if on_tool_call:
                     on_tool_call(tc, result)
                 messages.append({

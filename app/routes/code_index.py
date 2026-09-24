@@ -6,10 +6,11 @@ import threading
 import time
 import logging
 from datetime import datetime, timezone
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, g
 from app.models import db, CodeRepository, IndexedFile
 from app.services.code_index_builder import build_index, delete_index
 from app.services.security_service import require_api_key
+from app.services.auth_service import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,11 @@ PROGRESS_TIMEOUT = 600  # 10分钟无进度更新视为超时
 @require_api_key
 def list_repos():
     """获取所有代码仓库配置"""
-    repos = CodeRepository.query.order_by(CodeRepository.created_at.desc()).all()
+    user = get_current_user()
+    query = CodeRepository.query
+    if user:
+        query = query.filter((CodeRepository.user_id == user.id) | (CodeRepository.user_id == None))
+    repos = query.order_by(CodeRepository.created_at.desc()).all()
     
     # 如果有正在索引的仓库，从内存获取最新进度
     result = []
@@ -81,10 +86,12 @@ def create_repo():
         return jsonify({'status': 'error', 'message': f'仓库名称已存在: {name}'}), 400
 
     # 创建新仓库配置
+    user = get_current_user()
     repo = CodeRepository(
         name=name,
         path=path,
         status='pending',
+        user_id=user.id if user else None
     )
     db.session.add(repo)
     db.session.commit()
@@ -103,6 +110,11 @@ def get_repo(repo_id):
 
     if not repo:
         return jsonify({'status': 'error', 'message': '仓库不存在'}), 404
+    
+    # 用户权限检查
+    user = get_current_user()
+    if user and repo.user_id and repo.user_id != user.id:
+        return jsonify({'status': 'error', 'message': '无权访问此仓库'}), 403
 
     return jsonify({
         'status': 'success',
@@ -118,6 +130,11 @@ def delete_repo(repo_id):
 
     if not repo:
         return jsonify({'status': 'error', 'message': '仓库不存在'}), 404
+    
+    # 用户权限检查
+    user = get_current_user()
+    if user and repo.user_id and repo.user_id != user.id:
+        return jsonify({'status': 'error', 'message': '无权删除此仓库'}), 403
 
     repo_name = repo.name
 
@@ -147,6 +164,11 @@ def trigger_index(repo_id):
 
     if not repo:
         return jsonify({'status': 'error', 'message': '仓库不存在'}), 404
+
+    # 用户权限检查
+    user = get_current_user()
+    if user and repo.user_id and repo.user_id != user.id:
+        return jsonify({'status': 'error', 'message': '无权操作此仓库'}), 403
 
     # 检查是否已有索引任务在运行
     if repo.status == 'indexing':
@@ -332,6 +354,11 @@ def get_index_progress(repo_id):
     if not repo:
         return jsonify({'status': 'error', 'message': '仓库不存在'}), 404
 
+    # 用户权限检查
+    user = get_current_user()
+    if user and repo.user_id and repo.user_id != user.id:
+        return jsonify({'status': 'error', 'message': '无权访问此仓库'}), 403
+
     with _indexing_lock:
         progress_data = _indexing_progress.get(repo_id, {
             'progress': repo.progress or 0,
@@ -373,6 +400,11 @@ def cancel_index(repo_id):
 
     if not repo:
         return jsonify({'status': 'error', 'message': '仓库不存在'}), 404
+    
+    # 用户权限检查
+    user = get_current_user()
+    if user and repo.user_id and repo.user_id != user.id:
+        return jsonify({'status': 'error', 'message': '无权操作此仓库'}), 403
     
     if repo.status != 'indexing':
         return jsonify({'status': 'error', 'message': '没有正在运行的索引任务'}), 400

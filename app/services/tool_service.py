@@ -15,7 +15,7 @@ from flask import current_app
 logger = logging.getLogger(__name__)
 
 
-def _build_tools_list():
+def _build_tools_list(user_id=None):
     """根据配置动态构建工具列表"""
     tools = [
         {
@@ -67,10 +67,10 @@ def _build_tools_list():
 
     # 代码库搜索（按配置决定是否启用）
     if current_app.config.get("CODE_INDEX_ENABLED", False):
-        # 动态获取已索引的仓库列表，写入工具描述让 LLM 知道有哪些仓库可选
+        # 动态获取当前用户有权限访问的已索引仓库列表
         try:
             from app.services.code_index_service import list_indexed_repos
-            indexed_repos = list_indexed_repos()
+            indexed_repos = list_indexed_repos(user_id=user_id)
         except Exception:
             indexed_repos = []
         
@@ -179,9 +179,9 @@ def _build_tools_list():
     return tools
 
 
-def get_tools():
+def get_tools(user_id=None):
     """获取工具列表（每次调用都重新构建，以支持运行时开关）"""
-    return _build_tools_list()
+    return _build_tools_list(user_id)
 
 
 # 危险工具列表：这些工具执行前需要用户确认
@@ -202,7 +202,7 @@ def get_dangerous_tool_reason(tool_name):
     return DANGEROUS_TOOLS.get(tool_name, "该操作可能存在风险")
 
 
-def execute_tool(name, arguments):
+def execute_tool(name, arguments, user_id=None):
     """执行工具调用"""
     args = json.loads(arguments) if isinstance(arguments, str) else arguments
 
@@ -215,7 +215,7 @@ def execute_tool(name, arguments):
         pass
 
     try:
-        result = _dispatch_tool(name, args)
+        result = _dispatch_tool(name, args, user_id=user_id)
         return result
     except Exception as e:
         # 工具执行异常时 rollback，防止后续工具连锁报 InFailedSqlTransaction
@@ -230,7 +230,7 @@ def execute_tool(name, arguments):
         return json.dumps({"error": f"工具执行失败，请稍后重试", "results": []})
 
 
-def _dispatch_tool(name, args):
+def _dispatch_tool(name, args, user_id=None):
     """工具分发"""
     if name == "get_current_time":
         return json.dumps({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
@@ -242,10 +242,10 @@ def _dispatch_tool(name, args):
         return _exec_web_search(args)
 
     if name == "search_code":
-        return _exec_search_code(args)
+        return _exec_search_code(args, user_id=user_id)
 
     if name == "knowledge_search":
-        return _exec_knowledge_search(args)
+        return _exec_knowledge_search(args, user_id=user_id)
 
     if name == "execute_code":
         return _exec_code(args)
@@ -278,7 +278,7 @@ def _exec_calculate(args):
         return json.dumps({"error": "计算表达式有误，请检查输入"})
 
 
-def _exec_search_code(args):
+def _exec_search_code(args, user_id=None):
     """代码库向量搜索"""
     from app.services.code_index_service import search_code
     
@@ -289,7 +289,7 @@ def _exec_search_code(args):
     repo = args.get("repo", None)
     
     try:
-        results = search_code(query, repo_name=repo)
+        results = search_code(query, repo_name=repo, user_id=user_id)
         
         if not results:
             return json.dumps({"message": "代码库中未找到相关内容", "results": []})
@@ -448,13 +448,13 @@ def _ddg_search(query: str, max_results: int) -> str:
     return json.dumps({"results": formatted}, ensure_ascii=False)
 
 
-def _exec_knowledge_search(args):
+def _exec_knowledge_search(args, user_id=None):
     """知识库检索"""
     if not current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False):
         return json.dumps({"message": "知识库查询功能未启用", "results": []})
     try:
         from app.services.rag_service import search
-        results = search(args["query"])
+        results = search(args["query"], user_id=user_id)
         if not results:
             return json.dumps({"message": "知识库中未找到相关内容", "results": []})
         formatted = [
@@ -494,7 +494,7 @@ def _exec_code(args):
         if f in code:
             return json.dumps({"error": f"代码包含禁止的操作: {f}"})
 
-    # 在子进程中执行
+    # 本地执行
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tmp:
             tmp.write(code)

@@ -200,7 +200,7 @@ def _bm25_score(query_tokens, doc_idx, index):
     return score
 
 
-def _hybrid_search(query, top_k=None):
+def _hybrid_search(query, top_k=None, user_id=None):
     """BM25 + 向量混合检索（优化版，含重试机制）"""
     if top_k is None:
         top_k = current_app.config["RAG_TOP_K"]
@@ -229,13 +229,20 @@ def _hybrid_search(query, top_k=None):
             else:
                 logger.error(f"Embedding 请求最终失败: {e}")
                 return []
+    
+    # 构建查询并添加用户过滤
+    query_obj = db.session.query(
+        DocumentChunk, 
+        Document.filename,
+        DocumentChunk.embedding.cosine_distance(query_embedding).label('distance')
+    ).join(Document, DocumentChunk.document_id == Document.id)
+    
+    # 如果提供了 user_id，只搜索该用户的文档
+    if user_id is not None:
+        query_obj = query_obj.filter(Document.user_id == user_id)
+    
     vector_results = (
-        db.session.query(
-            DocumentChunk, 
-            Document.filename,
-            DocumentChunk.embedding.cosine_distance(query_embedding).label('distance')
-        )
-        .join(Document, DocumentChunk.document_id == Document.id)
+        query_obj
         .order_by(DocumentChunk.embedding.cosine_distance(query_embedding))
         .limit(top_k * 3)
         .all()
@@ -411,7 +418,13 @@ def _rerank_results(query, results, top_k=None):
 # ============================================================
 
 @traceable(name="rag_process_and_store")
-def process_and_store(file_storage):
+def process_and_store(file_storage, user_id=None):
+    """处理并存储文档
+    
+    Args:
+        file_storage: 上传的文件对象
+        user_id: 用户ID，用于多用户隔离
+    """
     filename = file_storage.filename
     ext = filename.rsplit(".", 1)[1].lower()
     file_size = file_storage.content_length or 0
@@ -429,6 +442,7 @@ def process_and_store(file_storage):
         file_type=ext,
         file_size=file_size,
         chunk_count=len(chunks),
+        user_id=user_id,
     )
     db.session.add(doc)
     db.session.flush()
@@ -447,7 +461,7 @@ def process_and_store(file_storage):
 
 
 @traceable(name="rag_search")
-def search(query, top_k=None):
+def search(query, top_k=None, user_id=None):
     """搜索知识库（支持缓存 + 多查询 + 混合检索 + 重排序）"""
     if top_k is None:
         top_k = current_app.config["RAG_TOP_K"]
@@ -465,7 +479,7 @@ def search(query, top_k=None):
     # 2. 对每个查询变体执行混合检索并合并去重
     all_results = {}
     for q in queries:
-        results = _hybrid_search(q, top_k=top_k * 2)  # 多取一些用于合并
+        results = _hybrid_search(q, top_k=top_k * 2, user_id=user_id)  # 多取一些用于合并
         for r in results:
             key = (r['document_id'], r['chunk_index'])
             if key not in all_results or all_results[key]['score'] < r['score']:
@@ -484,17 +498,40 @@ def search(query, top_k=None):
     return final_results
 
 
-def delete_document(doc_id):
+def delete_document(doc_id, user_id=None):
+    """删除文档
+    
+    Args:
+        doc_id: 文档ID
+        user_id: 用户ID，用于权限验证（如果提供，只能删除自己的文档）
+    """
     doc = db.session.get(Document, doc_id)
     if not doc:
         return False
+    
+    # 如果指定了 user_id，验证文档归属
+    if user_id is not None and doc.user_id != user_id:
+        return False
+    
     db.session.delete(doc)
     db.session.commit()
     return True
 
 
-def list_documents():
-    docs = Document.query.order_by(Document.created_at.desc()).all()
+def list_documents(user_id=None):
+    """列出文档
+    
+    Args:
+        user_id: 用户ID，如果提供则只返回该用户的文档；如果为 None 则返回所有文档
+    
+    Returns:
+        文档列表
+    """
+    if user_id is not None:
+        docs = Document.query.filter_by(user_id=user_id).order_by(Document.created_at.desc()).all()
+    else:
+        docs = Document.query.order_by(Document.created_at.desc()).all()
+    
     return [
         {
             "id": d.id,

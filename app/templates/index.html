@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI 智能助手</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script>
+        // 认证检查 - 未登录跳转到登录页
+        if (!localStorage.getItem('token')) {
+            window.location.href = '/login';
+        }
+    </script>
 </head>
 <body>
     <div class="app-container">
@@ -156,6 +162,8 @@
                     <button id="share-btn" class="header-action-btn" title="分享对话">🔗</button>
                     <button id="export-btn" class="header-action-btn" title="导出对话">📥</button>
                     <button id="interrupt-btn" class="interrupt-btn" style="display:none;">⏹ 打断</button>
+                    <span class="user-display" id="user-display" style="margin-left:8px; font-size:0.85rem; color:#888;">{{ current_user.username if current_user else '' }}</span>
+                    <button id="logout-btn" class="header-action-btn" title="退出登录" style="font-size:0.85rem;">🚪</button>
                 </div>
             </div>
 
@@ -169,11 +177,34 @@
             <div class="input-area">
                 <div class="input-wrapper">
                     <textarea id="message-input" placeholder="输入消息... (Enter发送, Shift+Enter换行)" rows="1"></textarea>
+                    <button id="agent-mode-btn" class="agent-mode-btn" title="Agent模式：多步骤推理，适合复杂任务">
+                        <span class="agent-icon">🤖</span>
+                        <span class="agent-label">Agent</span>
+                    </button>
+                    <button id="voice-btn" class="voice-btn" title="语音输入">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                            <line x1="12" y1="19" x2="12" y2="23"/>
+                            <line x1="8" y1="23" x2="16" y2="23"/>
+                        </svg>
+                    </button>
                     <button id="send-btn" class="send-btn">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M22 2L11 13M22 2L15 22L11 13L2 9L22 2Z"/>
                         </svg>
                     </button>
+                </div>
+                <div id="voice-status" class="voice-status" style="display: none;">
+                    <span class="voice-indicator"></span>
+                    <span>正在录音...</span>
+                </div>
+                <div id="agent-status" class="agent-status" style="display: none;">
+                    <div class="agent-status-header">
+                        <span class="agent-status-icon">🤖</span>
+                        <span>Agent 正在思考...</span>
+                    </div>
+                    <div class="agent-steps" id="agent-steps"></div>
                 </div>
             </div>
         </main>

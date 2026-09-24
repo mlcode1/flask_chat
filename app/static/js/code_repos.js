@@ -14,12 +14,29 @@
 
     let currentRepoForSearch = null;
 
+    // 获取认证 token
+    function getAuthToken() {
+        return localStorage.getItem("token");
+    }
+
+    // 带认证的 fetch 封装
+    function authFetch(url, options = {}) {
+        const token = getAuthToken();
+        if (token) {
+            options.headers = options.headers || {};
+            options.headers["Authorization"] = `Bearer ${token}`;
+        }
+        return fetch(url, options);
+    }
+
     // ========== WebSocket 连接 ==========
+    const token = getAuthToken();
     const socket = io({
         transports: ['websocket'],
         reconnection: true,
         reconnectionDelay: 1000,
-        reconnectionAttempts: 5
+        reconnectionAttempts: 5,
+        auth: token ? { token } : {}
     });
 
     socket.on('connect', () => {
@@ -183,7 +200,7 @@
     // ========== 加载代码库列表 ==========
     async function loadCodeRepos() {
         try {
-            const res = await fetch("/api/code-repos");
+            const res = await authFetch("/api/code-repos");
             const data = await res.json();
 
             if (!codeRepoList) return;
@@ -320,7 +337,7 @@
             }
 
             try {
-                const res = await fetch('/api/code-repos', {
+                const res = await authFetch('/api/code-repos', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name, path })
@@ -347,7 +364,7 @@
     // ========== 触发索引 ==========
     async function triggerIndex(repoId, mode = 'full', reindex = true) {
         try {
-            const res = await fetch(`/api/code-repos/${repoId}/index`, {
+            const res = await authFetch(`/api/code-repos/${repoId}/index`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode, reindex })
@@ -371,7 +388,7 @@
     // ========== 删除仓库 ==========
     async function deleteRepo(repoId) {
         try {
-            const res = await fetch(`/api/code-repos/${repoId}`, {
+            const res = await authFetch(`/api/code-repos/${repoId}`, {
                 method: 'DELETE'
             });
             const data = await res.json();
@@ -391,7 +408,7 @@
     // ========== 取消索引 ==========
     async function cancelIndex(repoId) {
         try {
-            const res = await fetch(`/api/code-repos/${repoId}/cancel`, {
+            const res = await authFetch(`/api/code-repos/${repoId}/cancel`, {
                 method: 'POST'
             });
             const data = await res.json();
@@ -422,7 +439,7 @@
             resultsDiv.innerHTML = '<div class="loading">搜索中...</div>';
 
             try {
-                const res = await fetch('/api/code-repos/test-search', {
+                const res = await authFetch('/api/code-repos/test-search', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -460,7 +477,7 @@
     // ========== 统计信息 ==========
     async function loadCodeReposStats() {
         try {
-            const res = await fetch("/api/code-repos");
+            const res = await authFetch("/api/code-repos");
             const data = await res.json();
             if (!statsEl) return;
 

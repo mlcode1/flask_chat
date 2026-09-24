@@ -57,7 +57,7 @@ def get_query_embedding(text: str) -> list[float]:
     return response.data[0].embedding
 
 
-def search_code(query: str, repo_name: str = None, top_k: int = None) -> list[dict]:
+def search_code(query: str, repo_name: str = None, top_k: int = None, user_id: int = None) -> list[dict]:
     """
     在代码库两层索引中搜索相关代码片段
     
@@ -68,8 +68,9 @@ def search_code(query: str, repo_name: str = None, top_k: int = None) -> list[di
     
     Args:
         query: 查询文本
-        repo_name: 仓库名称（不传则使用默认仓库）
+        repo_name: 仓库名称（不传则搜索用户所有仓库）
         top_k: 返回结果数量（不传则使用配置值）
+        user_id: 用户ID，用于权限隔离（只搜索该用户拥有的仓库）
     
     Returns:
         相关代码片段列表，包含 content, file_path, file_name, file_type, score
@@ -82,16 +83,21 @@ def search_code(query: str, repo_name: str = None, top_k: int = None) -> list[di
         top_k = current_app.config.get("CODE_INDEX_TOP_K", 8)
     
     if repo_name is not None:
-        # 指定了仓库名，直接使用（LLM 已从工具描述的可选列表中选择）
+        # 指定了仓库名，校验该用户是否有权限访问
+        if user_id is not None:
+            allowed_repos = list_indexed_repos(user_id=user_id)
+            if repo_name not in allowed_repos:
+                logger.warning(f"用户 {user_id} 无权访问仓库 {repo_name}")
+                return []
         repos_to_search = [repo_name]
     else:
-        # 没有指定仓库时，搜索所有已索引的仓库
-        indexed_repos = list_indexed_repos()
+        # 没有指定仓库时，搜索该用户有权限的所有仓库
+        indexed_repos = list_indexed_repos(user_id=user_id)
         if not indexed_repos:
             logger.warning("没有找到任何已索引的代码库")
             return []
         repos_to_search = indexed_repos
-        logger.info(f"未指定仓库名，搜索所有已索引仓库: {', '.join(repos_to_search)}")
+        logger.info(f"未指定仓库名，搜索用户可访问的仓库: {', '.join(repos_to_search)}")
     
     all_results = []
     
@@ -281,45 +287,60 @@ def _fallback_single_layer_search(query: str, repo_name: str, top_k: int, query_
         return []
 
 
-def list_indexed_repos() -> list[str]:
-    """列出已索引的仓库"""
+def list_indexed_repos(user_id=None) -> list[str]:
+    """列出已索引的仓库
+    
+    Args:
+        user_id: 用户ID。如果提供，只返回该用户拥有的仓库 + 公共仓库（user_id IS NULL）。
+                 如果不提供，返回所有仓库（向后兼容）。
+    """
     if not current_app.config.get("CODE_INDEX_ENABLED", False):
         return []
     
-    conn = None
-    cursor = None
     try:
+        from app.extensions import db
+        from app.models import CodeRepository
+        
+        # 获取所有已索引的仓库名称（从 code_index 数据库的表名推断）
         conn = get_code_index_db_connection()
         cursor = conn.cursor()
-        
-        # 查询所有 data_code_summaries_* 表（第一层索引表，PGVectorStore 固定加 data_ 前缀）
         cursor.execute("""
             SELECT table_name 
             FROM information_schema.tables 
             WHERE table_schema = 'public' 
             AND table_name LIKE 'data_code_summaries_%'
         """)
+        indexed_table_names = set(
+            row[0].replace("data_code_summaries_", "") for row in cursor.fetchall()
+        )
+        cursor.close()
+        conn.close()
         
-        tables = cursor.fetchall()
+        if not indexed_table_names:
+            return []
         
-        repos = [table[0].replace("data_code_summaries_", "") for table in tables]
+        # 从 flask_chat 数据库的 code_repositories 表查询用户权限
+        query = CodeRepository.query.filter(
+            CodeRepository.name.in_(indexed_table_names),
+            CodeRepository.status == 'indexed'
+        )
+        
+        if user_id is not None:
+            # 只返回当前用户拥有的仓库 + 公共仓库（user_id IS NULL）
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    CodeRepository.user_id == user_id,
+                    CodeRepository.user_id == None
+                )
+            )
+        
+        repos = [repo.name for repo in query.all()]
         return sorted(repos)
         
     except Exception as e:
         logger.error(f"获取已索引仓库列表失败: {e}")
         return []
-    finally:
-        # 确保连接和游标被正确关闭
-        if cursor:
-            try:
-                cursor.close()
-            except:
-                pass
-        if conn:
-            try:
-                conn.close()
-            except:
-                pass
 
 
 def diagnose_index(repo_name: str) -> dict:

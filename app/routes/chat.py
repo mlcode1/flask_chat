@@ -19,6 +19,7 @@ from app.services.verifier_service import VerifierService
 from app.services.security_service import (
     require_api_key, filter_input, log_audit
 )
+from app.services.auth_service import get_current_user
 from app.middleware import get_disclaimer
 from app.services import cache_service as cache_service_module
 from app.services.cache_service import hash_context
@@ -34,24 +35,53 @@ chat_bp = Blueprint("chat", __name__)
 # 页面 & 配置接口
 # ============================================================
 
+@chat_bp.route("/login")
+def login_page():
+    """登录页面"""
+    return render_template("login.html")
+
+
 @chat_bp.route("/")
 def index():
-    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).limit(50).all()
-    return render_template("index.html", conversations=conversations)
+    # 不做后端登录检查，让前端处理认证逻辑
+    return render_template("index.html", conversations=[], current_user=None)
 
 
 @chat_bp.route("/knowledge")
 def knowledge_page():
     """知识库管理页面"""
-    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).limit(50).all()
-    return render_template("knowledge.html", conversations=conversations)
+    # 不做后端登录检查，让前端处理认证逻辑
+    return render_template("knowledge.html", conversations=[], current_user=None)
 
 
 @chat_bp.route("/code-repos")
 def code_repos_page():
     """代码库管理页面"""
-    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).limit(50).all()
-    return render_template("code_repos.html", conversations=conversations)
+    # 不做后端登录检查，让前端处理认证逻辑
+    return render_template("code_repos.html", conversations=[], current_user=None)
+
+
+@chat_bp.route("/api/conversations", methods=["GET"])
+@require_api_key
+def get_conversations():
+    """获取对话列表"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    # 获取当前用户的对话 + 未绑定用户的旧对话（向后兼容）
+    conversations = Conversation.query.filter(
+        db.or_(
+            Conversation.user_id == user.id,
+            Conversation.user_id == None
+        )
+    ).order_by(Conversation.updated_at.desc()).limit(50).all()
+    
+    return jsonify([{
+        "id": c.id,
+        "title": c.title,
+        "updated_at": c.updated_at.isoformat() if c.updated_at else None
+    } for c in conversations])
 
 
 @chat_bp.route("/api/models")
@@ -170,7 +200,22 @@ def clear_cache():
 def create_conversation():
     data = request.get_json(silent=True) or {}
     title = data.get("title", "新对话")
-    conv = Conversation(title=title)
+    template_id = data.get("template_id")
+    system_prompt = ""
+    
+    # If template is specified, get its system_prompt
+    if template_id:
+        from app.models import ConversationTemplate
+        template = db.session.get(ConversationTemplate, template_id)
+        if template:
+            system_prompt = template.system_prompt
+    
+    user = get_current_user()
+    conv = Conversation(
+        title=title, 
+        user_id=user.id if user else None,
+        system_prompt=system_prompt
+    )
     db.session.add(conv)
     db.session.commit()
     log_audit("create_conversation", conversation_id=conv.id, detail=title)
@@ -226,11 +271,18 @@ def get_messages(cid):
 @chat_bp.route("/api/conversations/<int:cid>", methods=["DELETE"])
 @require_api_key
 def delete_conversation(cid):
+    user = get_current_user()
+    conv = db.session.get(Conversation, cid)
+    if not conv:
+        raise NotFoundError("对话不存在")
+    
+    # 用户权限校验：只能删除自己的对话
+    if user and conv.user_id and conv.user_id != user.id:
+        raise NotFoundError("对话不存在")
+    
     Message.query.filter_by(conversation_id=cid).delete()
     SharedConversation.query.filter_by(conversation_id=cid).delete()
-    conv = db.session.get(Conversation, cid)
-    if conv:
-        db.session.delete(conv)
+    db.session.delete(conv)
     db.session.commit()
     log_audit("delete_conversation", conversation_id=cid)
     return jsonify({"status": "deleted"})
@@ -240,6 +292,7 @@ def delete_conversation(cid):
 @require_api_key
 def rename_conversation(cid):
     """重命名对话标题"""
+    user = get_current_user()
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
     if not title:
@@ -247,6 +300,11 @@ def rename_conversation(cid):
     conv = db.session.get(Conversation, cid)
     if not conv:
         raise NotFoundError("对话不存在")
+    
+    # 用户权限校验：只能修改自己的对话
+    if user and conv.user_id and conv.user_id != user.id:
+        raise NotFoundError("对话不存在")
+    
     conv.title = title[:50]
     db.session.commit()
     log_audit("rename_conversation", conversation_id=cid, detail=title)

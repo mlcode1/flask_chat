@@ -7,10 +7,25 @@
     const kbDocList = document.getElementById("kb-doc-list");
     const statsEl = document.getElementById("knowledge-stats");
 
+    // 获取认证 token
+    function getAuthToken() {
+        return localStorage.getItem("token");
+    }
+
+    // 带认证的 fetch 封装
+    function authFetch(url, options = {}) {
+        const token = getAuthToken();
+        if (token) {
+            options.headers = options.headers || {};
+            options.headers["Authorization"] = `Bearer ${token}`;
+        }
+        return fetch(url, options);
+    }
+
     // ========== 加载文档列表 ==========
     async function loadDocuments() {
         try {
-            const res = await fetch("/api/documents");
+            const res = await authFetch("/api/documents");
             const docs = await res.json();
             renderDocuments(docs);
         } catch (e) {
@@ -40,7 +55,7 @@
             `;
             const delBtn = item.querySelector(".kb-doc-delete");
             delBtn.addEventListener("click", async () => {
-                await fetch(`/api/documents/${doc.id}`, { method: "DELETE" });
+                await authFetch(`/api/documents/${doc.id}`, { method: "DELETE" });
                 loadDocuments();
                 loadKnowledgeStats();
             });
@@ -66,7 +81,7 @@
             formData.append("file", file);
 
             try {
-                const res = await fetch("/api/documents/upload", {
+                const res = await authFetch("/api/documents/upload", {
                     method: "POST",
                     body: formData,
                 });
@@ -89,7 +104,7 @@
     // ========== 统计信息 ==========
     async function loadKnowledgeStats() {
         try {
-            const res = await fetch("/api/documents");
+            const res = await authFetch("/api/documents");
             const docs = await res.json();
             if (!statsEl) return;
 

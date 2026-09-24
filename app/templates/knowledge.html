@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>知识库管理 - AI 智能助手</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script>
+        // 认证检查 - 未登录跳转到登录页
+        if (!localStorage.getItem('token')) {
+            window.location.href = '/login';
+        }
+    </script>
 </head>
 <body>
     <div class="app-container">
