@@ -19,7 +19,7 @@ from app.services.verifier_service import VerifierService
 from app.services.security_service import (
     require_api_key, filter_input, log_audit
 )
-from app.services.auth_service import get_current_user
+from app.services.auth_service import get_current_user, login_required
 from app.middleware import get_disclaimer
 from app.services import cache_service as cache_service_module
 from app.services.cache_service import hash_context
@@ -222,6 +222,137 @@ def create_conversation():
     return jsonify({"id": conv.id, "title": conv.title})
 
 
+@chat_bp.route("/api/stats/token-usage")
+@require_api_key
+def get_token_usage_stats():
+    """获取Token用量统计"""
+    from sqlalchemy import func
+    from datetime import datetime, timedelta
+    
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+    
+    # 时间范围
+    period = request.args.get("period", "week")  # day, week, month, all
+    
+    query = Message.query.filter(Message.conversation.has(user_id=user.id))
+    
+    if period == "day":
+        query = query.filter(Message.created_at >= datetime.utcnow() - timedelta(days=1))
+    elif period == "week":
+        query = query.filter(Message.created_at >= datetime.utcnow() - timedelta(weeks=1))
+    elif period == "month":
+        query = query.filter(Message.created_at >= datetime.utcnow() - timedelta(days=30))
+    # "all" 不过滤
+    
+    # 统计总量
+    stats = query.with_entities(
+        func.count(Message.id).label("total_messages"),
+        func.sum(Message.input_tokens).label("total_input_tokens"),
+        func.sum(Message.output_tokens).label("total_output_tokens"),
+        func.sum(Message.token_count).label("total_tokens")
+    ).first()
+    
+    # 按日期分组统计（最近7天）
+    daily_stats = []
+    if period in ["week", "day"]:
+        for i in range(7):
+            day_start = datetime.utcnow() - timedelta(days=i, hours=datetime.utcnow().hour)
+            day_end = day_start + timedelta(days=1)
+            day_query = Message.query.filter(Message.conversation.has(user_id=user.id)).filter(
+                Message.created_at >= day_start,
+                Message.created_at < day_end
+            )
+            day_stats = day_query.with_entities(
+                func.sum(Message.input_tokens).label("input"),
+                func.sum(Message.output_tokens).label("output")
+            ).first()
+            daily_stats.append({
+                "date": day_start.strftime("%m-%d"),
+                "input": day_stats.input or 0,
+                "output": day_stats.output or 0,
+                "total": (day_stats.input or 0) + (day_stats.output or 0)
+            })
+        daily_stats.reverse()  # 按时间正序
+    
+    total_in = stats.total_input_tokens or 0
+    total_out = stats.total_output_tokens or 0
+    # 优先使用 input+output，如果为0则回退到 token_count (兼容旧数据)
+    calculated_total = total_in + total_out
+    final_total = calculated_total if calculated_total > 0 else (stats.total_tokens or 0)
+    
+    return jsonify({
+        "total_messages": stats.total_messages or 0,
+        "total_input_tokens": total_in,
+        "total_output_tokens": total_out,
+        "total_tokens": final_total,
+        "estimated_cost": final_total * 0.00003,
+        "daily_stats": daily_stats,
+        "period": period
+    })
+
+
+@chat_bp.route("/api/conversations/search")
+@login_required
+def search_conversations():
+    """搜索对话"""
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"error": "搜索关键词不能为空"}), 400
+    
+    user = get_current_user()
+    results = []
+    
+    # 搜索对话标题
+    conversations = Conversation.query.filter(
+        Conversation.user_id == user.id,
+        Conversation.title.ilike(f"%{query}%")
+    ).order_by(Conversation.updated_at.desc()).limit(20).all()
+    
+    for conv in conversations:
+        results.append({
+            "id": conv.id,
+            "title": conv.title,
+            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+            "match_type": "title"
+        })
+    
+    # 搜索消息内容
+    messages = Message.query.join(Conversation).filter(
+        Conversation.user_id == user.id,
+        Message.content.ilike(f"%{query}%")
+    ).order_by(Message.created_at.desc()).limit(50).all()
+    
+    # 按对话分组
+    conv_messages = {}
+    for msg in messages:
+        if msg.conversation_id not in conv_messages:
+            conv_messages[msg.conversation_id] = {
+                "conversation": msg.conversation,
+                "messages": []
+            }
+        conv_messages[msg.conversation_id]["messages"].append(msg)
+    
+    # 添加到结果（去重）
+    existing_ids = {r["id"] for r in results}
+    for conv_id, data in conv_messages.items():
+        if conv_id not in existing_ids:
+            conv = data["conversation"]
+            # 获取匹配的消息片段
+            preview = data["messages"][0].content[:100] + "..." if data["messages"][0].content else ""
+            results.append({
+                "id": conv.id,
+                "title": conv.title,
+                "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+                "match_type": "content",
+                "preview": preview,
+                "match_count": len(data["messages"])
+            })
+    
+    return jsonify(results)
+
+
 @chat_bp.route("/api/conversations/<int:cid>/messages")
 @require_api_key
 def get_messages(cid):
@@ -361,6 +492,55 @@ def upload_image():
     data_url = f"data:{mime};base64,{b64}"
 
     return jsonify({"url": data_url, "filename": file.filename})
+
+
+@chat_bp.route("/api/upload/file", methods=["POST"])
+@require_api_key
+def upload_file():
+    """上传文件，返回文件内容供对话使用"""
+    if "file" not in request.files:
+        raise BadRequestError("未选择文件")
+
+    file = request.files["file"]
+    if file.filename == "":
+        raise BadRequestError("未选择文件")
+
+    allowed_ext = {"pdf", "txt", "md", "py", "js", "ts", "tsx", "jsx", "java", "go", "rs", 
+                   "cpp", "c", "h", "json", "yaml", "yml", "csv", "log", "html", "css", 
+                   "sql", "sh", "rb", "php", "swift", "kt"}
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in allowed_ext:
+        raise BadRequestError(f"不支持的文件格式，支持: {', '.join(sorted(allowed_ext))}")
+
+    # 读取文件
+    data = file.read()
+    if len(data) > 10 * 1024 * 1024:  # 10MB limit
+        raise BadRequestError("文件大小超过 10MB 限制")
+
+    # 处理文件内容
+    content = ""
+    if ext == "pdf":
+        try:
+            import PyPDF2
+            import io
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(data))
+            pages = []
+            for page in pdf_reader.pages:
+                pages.append(page.extract_text())
+            content = "\n\n".join(pages)
+        except Exception as e:
+            content = f"[PDF解析失败: {str(e)}]"
+    else:
+        # 文本文件直接解码
+        try:
+            content = data.decode('utf-8')
+        except UnicodeDecodeError:
+            content = data.decode('latin-1')
+
+    # 添加文件名标记
+    content = f"[文件: {file.filename}]\n\n{content}"
+
+    return jsonify({"content": content, "filename": file.filename, "size": len(data)})
 
 
 # ============================================================

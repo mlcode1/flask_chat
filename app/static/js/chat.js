@@ -56,6 +56,98 @@
         return fetch(url, options);
     }
     
+    // 对话搜索功能
+    const searchInput = document.getElementById('conversation-search');
+    const searchResults = document.getElementById('search-results');
+    let searchTimeout = null;
+    
+    if (searchInput && searchResults) {
+        searchInput.addEventListener('input', (e) => {
+            const query = e.target.value.trim();
+            
+            // 清除之前的定时器
+            if (searchTimeout) {
+                clearTimeout(searchTimeout);
+            }
+            
+            // 如果查询为空，隐藏搜索结果
+            if (!query) {
+                searchResults.style.display = 'none';
+                return;
+            }
+            
+            // 延迟搜索（防抖）
+            searchTimeout = setTimeout(async () => {
+                try {
+                    const response = await authFetch(`/api/conversations/search?q=${encodeURIComponent(query)}`);
+                    if (response.ok) {
+                        const results = await response.json();
+                        displaySearchResults(results);
+                    }
+                } catch (error) {
+                    console.error('搜索失败:', error);
+                }
+            }, 300);
+        });
+        
+        // 点击搜索结果外部时关闭
+        document.addEventListener('click', (e) => {
+            if (!searchInput.contains(e.target) && !searchResults.contains(e.target)) {
+                searchResults.style.display = 'none';
+            }
+        });
+    }
+    
+    function displaySearchResults(results) {
+        if (!results || results.length === 0) {
+            searchResults.innerHTML = '<div class="search-empty">未找到匹配的对话</div>';
+            searchResults.style.display = 'block';
+            return;
+        }
+        
+        searchResults.innerHTML = results.map(r => `
+            <div class="search-result-item" data-conv-id="${r.id}">
+                <div class="search-result-title">${escapeHtml(r.title)}</div>
+                ${r.match_type === 'content' ? `<div class="search-result-preview">${escapeHtml(r.preview || '')}</div>` : ''}
+                <div class="search-result-meta">
+                    ${r.updated_at ? new Date(r.updated_at).toLocaleDateString('zh-CN') : ''}
+                    ${r.match_count ? ` · ${r.match_count}条匹配` : ''}
+                </div>
+            </div>
+        `).join('');
+        
+        // 绑定点击事件
+        searchResults.querySelectorAll('.search-result-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const convId = item.dataset.convId;
+                if (convId) {
+                    loadConversation(convId);
+                    searchResults.style.display = 'none';
+                    searchInput.value = '';
+                }
+            });
+        });
+        
+        searchResults.style.display = 'block';
+    }
+
+    // 搜索跳转到对话
+    function loadConversation(convId) {
+        if (!convId) return;
+        currentConvId = convId;
+        // 切换侧边栏高亮
+        document.querySelectorAll(".conversation-item").forEach(el => el.classList.remove("active"));
+        const target = convList.querySelector(`.conversation-item[data-id="${convId}"]`);
+        if (target) {
+            target.classList.add("active");
+        }
+        // 加入 WebSocket 房间并加载消息
+        if (socket) {
+            socket.emit('join', { conversation_id: convId });
+        }
+        loadMessages(convId);
+    }
+
     // 初始化 Socket.IO 连接（带认证）
     function initSocket() {
         if (socket) return;  // 已连接
@@ -85,7 +177,6 @@
         
         // 接收 token
         socket.on('token', (data) => {
-            // 如果当前没有 message_id 但有 bubble，说明是刚发送的消息，自动绑定
             if (!currentMessageId && currentBubble) {
                 currentMessageId = data.message_id;
                 console.log('[WS] Auto-bound message_id from first token:', currentMessageId);
@@ -94,8 +185,6 @@
             if (!currentBubble || currentMessageId !== data.message_id) return;
             
             fullContent += data.token;
-            const cursor = currentBubble.querySelector(".typing-cursor");
-            if (cursor) cursor.remove();
             currentBubble.innerHTML = formatContent(fullContent);
             currentBubble.appendChild(createCursor());
             scrollToBottom();
@@ -120,9 +209,7 @@
         socket.on('generation_completed', (data) => {
             if (!currentBubble || currentMessageId !== data.message_id) return;
             
-            const cursor = currentBubble.querySelector(".typing-cursor");
-            if (cursor) cursor.remove();
-            
+            // 最终全量渲染确保格式正确
             fullContent = data.content;
             currentBubble.innerHTML = formatContent(fullContent);
             
@@ -140,10 +227,10 @@
         socket.on('generation_stopped', (data) => {
             if (!currentBubble || currentMessageId !== data.message_id) return;
             
-            const cursor = currentBubble.querySelector(".typing-cursor");
+            // 移除光标，添加已打断标记
+            const cursor = currentBubble.querySelector('.typing-cursor');
             if (cursor) cursor.remove();
             
-            // 显示已停止标记
             const tag = document.createElement("span");
             tag.className = "interrupted-tag";
             tag.textContent = "已打断";
@@ -226,7 +313,7 @@
             }
         });
     }
-    
+
     // 初始化连接（仅在聊天页面）
     if (isChatPage) {
         initSocket();
@@ -453,7 +540,7 @@
         return html;
     }
 
-    // 工具调用可视化
+    // 工具调用可视化（支持流式状态）
     function renderToolCalls(bubble, toolCalls) {
         const container = document.createElement("div");
         container.className = "tool-calls-container";
@@ -478,15 +565,29 @@
         details.style.display = "none";
         
         toolCalls.forEach((tc, idx) => {
-            // 兼容 OpenAI 标准格式 {function:{name,arguments}} 和 旧格式 {name,arguments}
             const fn = tc.function || tc;
             const name = fn.name || "未知工具";
             const args = fn.arguments || "";
             const result = tc._result || tc.result || "";
+            const status = tc._status || "completed";
+            
             const call = document.createElement("div");
-            call.className = "tool-call-item";
+            call.className = `tool-call-item tool-status-${status}`;
+            
+            let statusIcon = "";
+            if (status === "running") {
+                statusIcon = '<span class="tool-status-icon running">⏳</span>';
+            } else if (status === "completed") {
+                statusIcon = '<span class="tool-status-icon completed">✅</span>';
+            } else if (status === "error") {
+                statusIcon = '<span class="tool-status-icon error">❌</span>';
+            }
+            
             call.innerHTML = `
-                <div class="tool-call-name">${escapeHtml(name)}</div>
+                <div class="tool-call-header">
+                    ${statusIcon}
+                    <div class="tool-call-name">${escapeHtml(name)}</div>
+                </div>
                 <div class="tool-call-args"><pre>${escapeHtml(args)}</pre></div>
                 ${result ? `<div class="tool-call-result"><pre>${escapeHtml(result)}</pre></div>` : ''}
             `;
@@ -956,9 +1057,98 @@
         showTemplateSelector();
     }
     
+    // 文件上传功能
+    const fileUploadBtn = document.getElementById('file-upload-btn');
+    const chatFileInput = document.getElementById('chat-file-input');
+    const filePreview = document.getElementById('file-preview');
+    let pendingFiles = [];
+    
+    if (fileUploadBtn && chatFileInput) {
+        fileUploadBtn.addEventListener('click', () => chatFileInput.click());
+        
+        chatFileInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            files.forEach(file => {
+                if (file.size > 10 * 1024 * 1024) {
+                    showToast(`${file.name} 超过 10MB 限制`, 'error');
+                    return;
+                }
+                pendingFiles.push(file);
+            });
+            chatFileInput.value = '';
+            renderFilePreview();
+        });
+    }
+    
+    function renderFilePreview() {
+        if (!filePreview) return;
+        
+        if (pendingFiles.length === 0) {
+            filePreview.style.display = 'none';
+            filePreview.innerHTML = '';
+            return;
+        }
+        
+        filePreview.style.display = 'flex';
+        filePreview.innerHTML = pendingFiles.map((file, idx) => `
+            <div class="file-preview-item">
+                <span class="file-preview-icon">📄</span>
+                <span class="file-preview-name" title="${file.name}">${file.name}</span>
+                <button class="file-preview-remove" data-idx="${idx}" title="移除">✕</button>
+            </div>
+        `).join('');
+        
+        filePreview.querySelectorAll('.file-preview-remove').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const idx = parseInt(e.target.dataset.idx);
+                pendingFiles.splice(idx, 1);
+                renderFilePreview();
+            });
+        });
+    }
+    
+    async function uploadFilesAndGetContext(files) {
+        if (files.length === 0) return '';
+        
+        const contexts = [];
+        for (const file of files) {
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const res = await authFetch('/api/upload/file', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (res.ok) {
+                    const data = await res.json();
+                    contexts.push(data.content || `[文件: ${file.name}]`);
+                } else {
+                    contexts.push(`[文件上传失败: ${file.name}]`);
+                }
+            } catch (err) {
+                console.error('文件上传失败:', err);
+                contexts.push(`[文件上传失败: ${file.name}]`);
+            }
+        }
+        
+        return contexts.join('\n\n---\n\n');
+    }
+
     async function sendMessage() {
-        const content = messageInput.value.trim();
-        if (!content || isStreaming) return;
+        let content = messageInput.value.trim();
+        if ((!content && pendingFiles.length === 0) || isStreaming) return;
+
+        // 如果有文件，先上传
+        if (pendingFiles.length > 0) {
+            const fileContext = await uploadFilesAndGetContext(pendingFiles);
+            if (fileContext) {
+                content = content ? `${content}\n\n${fileContext}` : fileContext;
+            }
+            pendingFiles = [];
+            renderFilePreview();
+        }
 
         // Agent 模式：调用 Agent API
         if (agentModeEnabled) {
@@ -2064,6 +2254,121 @@
         }
     }
 
+    async function loadTokenStats() {
+        try {
+            const response = await authFetch('/api/stats/token-usage');
+            const data = await response.json();
+            const badge = document.getElementById('token-total');
+            if (badge) {
+                badge.textContent = formatNumber(data.total_tokens || 0);
+            }
+        } catch (error) {
+            console.error('加载Token统计失败:', error);
+        }
+    }
+
+    function formatNumber(num) {
+        if (num === undefined || num === null || isNaN(num)) return '0';
+        num = Number(num);
+        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+        if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+        return num.toString();
+    }
+
+    async function showTokenStatsModal() {
+        try {
+            const response = await authFetch('/api/stats/token-usage');
+            const data = await response.json();
+            
+            const modal = document.createElement('div');
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-box modal-large stats-modal">
+                    <button class="modal-close-btn" title="关闭 (ESC)">&times;</button>
+                    <div class="modal-header">
+                        <h2>📊 Token 用量统计</h2>
+                    </div>
+                    <div class="modal-body">
+                        <div class="stats-summary">
+                            <div class="stat-card">
+                                <div class="stat-icon">💬</div>
+                                <div class="stat-value">${formatNumber(data.total_tokens)}</div>
+                                <div class="stat-label">总 Token</div>
+                            </div>
+                            <div class="stat-card stat-input">
+                                <div class="stat-icon">⬇️</div>
+                                <div class="stat-value">${formatNumber(data.total_input_tokens)}</div>
+                                <div class="stat-label">输入 Token</div>
+                            </div>
+                            <div class="stat-card stat-output">
+                                <div class="stat-icon">⬆️</div>
+                                <div class="stat-value">${formatNumber(data.total_output_tokens)}</div>
+                                <div class="stat-label">输出 Token</div>
+                            </div>
+                            <div class="stat-card stat-cost">
+                                <div class="stat-icon">💰</div>
+                                <div class="stat-value">¥${(data.estimated_cost || 0).toFixed(2)}</div>
+                                <div class="stat-label">预估费用</div>
+                            </div>
+                        </div>
+                        <div class="stats-chart">
+                            <div class="chart-header">
+                                <h3>最近7天用量趋势</h3>
+                                <div class="chart-legend">
+                                    <span class="legend-item"><span class="legend-color" style="background:#2196F3"></span>输入 Token</span>
+                                    <span class="legend-item"><span class="legend-color" style="background:#FF9800"></span>输出 Token</span>
+                                </div>
+                            </div>
+                            <div class="chart-container">
+                                ${data.daily_stats.map(day => `
+                                    <div class="chart-bar" style="height: ${Math.max(5, (day.total / Math.max(...data.daily_stats.map(d => d.total), 1)) * 100)}%">
+                                        <div class="bar-input" style="height: ${(day.input / day.total * 100) || 0}%"></div>
+                                        <div class="bar-output" style="height: ${(day.output / day.total * 100) || 0}%"></div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            <div class="chart-labels">
+                                ${data.daily_stats.map(day => `<span>${day.date}</span>`).join('')}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            document.body.appendChild(modal);
+            
+            // 关闭函数
+            const closeModal = () => {
+                modal.style.opacity = '0';
+                setTimeout(() => modal.remove(), 200);
+            };
+            
+            // 关闭按钮事件
+            modal.querySelector('.modal-close-btn').addEventListener('click', closeModal);
+            
+            // 点击遮罩层关闭
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) closeModal();
+            });
+            
+            // ESC 键关闭
+            const escHandler = (e) => {
+                if (e.key === 'Escape') {
+                    closeModal();
+                    document.removeEventListener('keydown', escHandler);
+                }
+            };
+            document.addEventListener('keydown', escHandler);
+            
+            // 入场动画
+            setTimeout(() => modal.style.opacity = '1', 10);
+            
+        } catch (error) {
+            console.error('加载Token统计失败:', error);
+            alert('加载统计信息失败');
+        }
+    }
+
     // 初始加载（按页面类型）
     if (isCodeReposPage && codeRepoList) {
         loadCodeRepos();
@@ -2071,6 +2376,16 @@
     if (isChatPage) {
         loadKnowledgeCount();
         loadCodeReposCount();
+        loadTokenStats();
+        
+        // Token统计按钮
+        const tokenStatsBtn = document.getElementById('token-stats-btn');
+        if (tokenStatsBtn) {
+            tokenStatsBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                showTokenStatsModal();
+            });
+        }
         
         // 检查登录状态并加载对话列表
         (async function initChat() {

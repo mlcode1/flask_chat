@@ -96,7 +96,9 @@ class Message(db.Model):
     interrupted = db.Column(db.Boolean, default=False)
     verification = db.Column(db.JSON, nullable=True)
     image_urls = db.Column(db.JSON, default=list)        # 多模态：图片 URL 列表
-    token_count = db.Column(db.Integer, default=0)       # Token 计数统计
+    token_count = db.Column(db.Integer, default=0)       # Token 计数统计（输出token）
+    input_tokens = db.Column(db.Integer, default=0)      # 输入token数
+    output_tokens = db.Column(db.Integer, default=0)     # 输出token数
     compressed = db.Column(db.Boolean, default=False)    # 是否已压缩到摘要中
     feedback = db.Column(db.String(20), nullable=True)   # like/dislike/null
     status = db.Column(db.String(20), default='completed')  # generating/completed/stopped/error

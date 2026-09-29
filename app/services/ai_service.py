@@ -56,12 +56,21 @@ class AIService:
         raise last_exception
 
     @traceable(name="chat_stream_response", run_type="llm")
-    def stream_response(self, messages, on_chunk=None, on_tool_call=None, stop_event=None, on_confirm_request=None, conversation_id=None, user_id=None):
+    def stream_response(self, messages, on_chunk=None, on_tool_call=None, stop_event=None, on_confirm_request=None, conversation_id=None, user_id=None, on_usage=None):
+        """流式响应，支持token用量统计
+        
+        Args:
+            on_usage: 回调函数，接收 (input_tokens, output_tokens) 参数
+        """
         full_content = ""
         tool_calls_accumulator = {}
+        total_input_tokens = 0
+        total_output_tokens = 0
 
         while True:
             if stop_event and stop_event.is_set():
+                if on_usage:
+                    on_usage(total_input_tokens, total_output_tokens)
                 yield "[已打断]"
                 return
 
@@ -76,6 +85,7 @@ class AIService:
                     tools=tools if tools else None,
                     tool_choice="auto" if tools else None,
                     stream=True,
+                    stream_options={"include_usage": True}  # 请求返回usage信息
                 )
             
             try:
@@ -97,8 +107,15 @@ class AIService:
 
             for chunk in response:
                 if stop_event and stop_event.is_set():
+                    if on_usage:
+                        on_usage(total_input_tokens, total_output_tokens)
                     yield "[已打断]"
                     return
+
+                # 捕获token用量数据（在最后一个chunk中）
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    total_input_tokens += chunk.usage.prompt_tokens
+                    total_output_tokens += chunk.usage.completion_tokens
 
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if not delta:
@@ -194,6 +211,10 @@ class AIService:
 
             full_content = ""
             tool_calls_accumulator = {}
+        
+        # 正常结束时回调usage数据
+        if on_usage:
+            on_usage(total_input_tokens, total_output_tokens)
 
     @traceable(name="chat_sync_complete", run_type="llm")
     def sync_complete(self, prompt, system_prompt=None):

@@ -1,11 +1,12 @@
 """
 上下文服务：对话历史管理、摘要压缩、长期记忆
-增强：结构化摘要、记忆提取、渐进式压缩
+增强：自适应上下文窗口、结构化摘要、记忆提取、渐进式压缩
 """
 import json
 import logging
 from datetime import datetime, timezone
 from langsmith import traceable
+from flask import current_app
 from app.extensions import db
 from app.models import Conversation, Message
 from app.utils import estimate_tokens
@@ -13,10 +14,81 @@ from app.utils import estimate_tokens
 logger = logging.getLogger(__name__)
 
 
+# 模型上下文窗口大小映射（token数）
+MODEL_CONTEXT_WINDOWS = {
+    # OpenAI
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-4": 8192,
+    "gpt-3.5-turbo": 16385,
+    # 火山引擎 / 智谱
+    "Qwen3.7-Max": 32768,
+    "Qwen3.7": 32768,
+    "Qwen3": 32768,
+    "glm-5.2": 128000,
+    "glm-4": 128000,
+    # Ollama 本地模型
+    "qwen2.5:7b": 32768,
+    "qwen2.5:14b": 32768,
+    "qwen2.5:3b": 32768,
+    "llama3.1:8b": 128000,
+    "llama3.1:70b": 128000,
+    "mistral:7b": 32768,
+    "deepseek-r1:7b": 65536,
+    "deepseek-r1:14b": 65536,
+}
+
+# 默认上下文窗口（未知模型）
+DEFAULT_CONTEXT_WINDOW = 8192
+
+# 输出预留比例（给模型回复留空间）
+OUTPUT_RESERVE_RATIO = 0.25
+
+# 压缩触发比例（上下文使用率超过此比例时触发压缩）
+COMPRESS_TRIGGER_RATIO = 0.7
+
+# 压缩后保留比例（压缩后上下文占窗口的比例）
+COMPRESS_RETAIN_RATIO = 0.5
+
+# 最少保留消息数
+MIN_RECENT_MESSAGES = 4
+
+
 class ContextService:
 
-    def __init__(self, max_tokens=4000):
-        self.max_tokens = max_tokens
+    def __init__(self, max_tokens=None, model=None):
+        """
+        初始化上下文服务
+        
+        Args:
+            max_tokens: 最大上下文 token 数（如果为 None，根据模型自动计算）
+            model: 当前使用的模型名称（用于自动计算上下文窗口）
+        """
+        self.model = model or current_app.config.get("OPENAI_MODEL", "gpt-4o")
+        
+        if max_tokens is not None:
+            self.max_tokens = max_tokens
+        else:
+            # 根据模型自动计算上下文窗口
+            context_window = self._get_model_context_window(self.model)
+            # 预留输出空间
+            self.max_tokens = int(context_window * (1 - OUTPUT_RESERVE_RATIO))
+            logger.debug(f"模型 {self.model}: 上下文窗口={context_window}, 输入上限={self.max_tokens}")
+    
+    @staticmethod
+    def _get_model_context_window(model_name):
+        """获取模型的上下文窗口大小"""
+        # 精确匹配
+        if model_name in MODEL_CONTEXT_WINDOWS:
+            return MODEL_CONTEXT_WINDOWS[model_name]
+        
+        # 模糊匹配（去掉版本号等后缀）
+        for key, value in MODEL_CONTEXT_WINDOWS.items():
+            if key.lower() in model_name.lower() or model_name.lower() in key.lower():
+                return value
+        
+        return DEFAULT_CONTEXT_WINDOW
 
     def count_tokens(self, text):
         """粗略估算 token 数（中文约 1.5 token/字，英文约 0.25 token/字）"""
@@ -36,25 +108,35 @@ class ContextService:
 
         context = []
 
-        # 1. 加入系统提示（如果有长期记忆）
+        # 1. 加入系统提示
         system_content = self._build_system_context(conversation)
+        system_tokens = self.count_tokens(system_content) if system_content else 0
         if system_content:
             context.append({
                 "role": "system",
                 "content": system_content
             })
 
-        # 2. 加入未压缩的最近消息（从后往前，直到 token 超限）
+        # 2. 计算可用于历史消息的 token 预算
+        available_tokens = self.max_tokens - system_tokens
+
+        # 3. 加入未压缩的最近消息（从后往前，直到 token 超限）
         recent_messages = []
         total_tokens = 0
         for msg in reversed(messages):
             msg_tokens = self.count_tokens(msg.content or "")
-            if total_tokens + msg_tokens > self.max_tokens:
+            # 工具调用也占 token
+            if msg.tool_calls:
+                msg_tokens += sum(
+                    self.count_tokens(json.dumps(tc, ensure_ascii=False))
+                    for tc in msg.tool_calls if isinstance(tc, dict)
+                ) * 0.3  # 工具调用大约占 30% 的额外 token
+            
+            if total_tokens + msg_tokens > available_tokens:
                 break
             total_tokens += msg_tokens
             entry = {"role": msg.role, "content": msg.content or ""}
             if msg.tool_calls:
-                # 转换为 OpenAI 标准格式（去除 _result 等自定义字段）
                 entry["tool_calls"] = [
                     {
                         "id": tc.get("id", ""),
@@ -78,6 +160,14 @@ class ContextService:
             recent_messages.insert(0, entry)
 
         context.extend(recent_messages)
+        
+        usage_ratio = (system_tokens + total_tokens) / self.max_tokens if self.max_tokens > 0 else 0
+        logger.debug(
+            f"构建上下文: {len(recent_messages)}条消息, "
+            f"系统提示{system_tokens}token, 历史{total_tokens}token, "
+            f"使用率{usage_ratio:.1%}"
+        )
+        
         return context
 
     def _build_system_context(self, conversation):
@@ -89,7 +179,6 @@ class ContextService:
             parts.append(conversation.system_prompt)
         
         # 2. 添加工具状态提示（动态告知 LLM 当前可用的功能）
-        from flask import current_app
         knowledge_enabled = current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False)
         code_index_enabled = current_app.config.get("CODE_INDEX_ENABLED", False)
         
@@ -116,17 +205,27 @@ class ContextService:
         return "\n\n".join(parts)
 
     def should_compress(self, conversation_id):
-        """判断是否需要压缩上下文"""
+        """判断是否需要压缩上下文（自适应：基于模型实际上下文窗口）"""
         messages = Message.query.filter_by(
             conversation_id=conversation_id,
             compressed=False
         ).all()
         total_tokens = sum(self.count_tokens(m.content or "") for m in messages)
-        return total_tokens > self.max_tokens * 1.5
+        
+        # 压缩阈值 = 上下文窗口 * 压缩触发比例
+        compress_threshold = int(self.max_tokens * COMPRESS_TRIGGER_RATIO)
+        
+        if total_tokens > compress_threshold:
+            logger.info(
+                f"触发压缩: 当前{total_tokens}token > 阈值{compress_threshold}token "
+                f"(使用率{total_tokens / self.max_tokens:.1%})"
+            )
+            return True
+        return False
 
     @traceable(name="compress_context")
     def compress_context(self, conversation_id, ai_service):
-        """压缩上下文：生成结构化摘要 + 提取记忆，保留最近消息"""
+        """压缩上下文：智能决定保留消息数，生成结构化摘要 + 提取记忆"""
         conversation = db.session.get(Conversation, conversation_id)
         if not conversation:
             return
@@ -136,12 +235,19 @@ class ContextService:
             compressed=False
         ).order_by(Message.created_at).all()
         
-        if len(messages) < 6:
+        if len(messages) < MIN_RECENT_MESSAGES + 2:
             return
 
-        # 保留最近 4 条消息，其余压缩
-        older = messages[:-4]
+        # 智能决定保留多少条消息（根据 token 预算）
+        retain_count = self._calculate_retain_count(messages)
+        
+        older = messages[:-retain_count]
         older_text = "\n".join(f"{m.role}: {m.content}" for m in older if m.content)
+        
+        if not older_text.strip():
+            return
+
+        logger.info(f"压缩上下文: 保留最近{retain_count}条, 压缩{len(older)}条消息")
 
         # 1. 生成结构化摘要
         summary_prompt = f"""请将以下对话历史压缩为结构化摘要。要求：
@@ -185,12 +291,10 @@ class ContextService:
         try:
             memory_json = ai_service.sync_complete(memory_prompt)
             if memory_json and memory_json.strip() != "无":
-                # 解析并合并到现有记忆
                 try:
                     new_memory = json.loads(memory_json)
                     existing_memory = json.loads(conversation.memory) if conversation.memory else {}
                     
-                    # 合并记忆
                     for key in ["preferences", "facts", "decisions"]:
                         if new_memory.get(key) and new_memory[key] != "无":
                             existing = existing_memory.get(key, "")
@@ -201,7 +305,6 @@ class ContextService:
                     
                     conversation.memory = json.dumps(existing_memory, ensure_ascii=False)
                 except json.JSONDecodeError:
-                    # 如果不是 JSON，作为文本追加
                     if conversation.memory:
                         conversation.memory = f"{conversation.memory}\n{memory_json}"
                     else:
@@ -220,6 +323,31 @@ class ContextService:
             msg.compressed = True
 
         db.session.commit()
+        logger.info(f"压缩完成: 压缩了{len(older)}条消息")
+
+    def _calculate_retain_count(self, messages):
+        """智能计算应该保留多少条未压缩消息"""
+        # 从最近的消息往前累加 token，直到达到保留预算
+        retain_budget = int(self.max_tokens * COMPRESS_RETAIN_RATIO)
+        total = 0
+        count = 0
+        
+        for msg in reversed(messages):
+            msg_tokens = self.count_tokens(msg.content or "")
+            if msg.tool_calls:
+                msg_tokens += sum(
+                    self.count_tokens(json.dumps(tc, ensure_ascii=False))
+                    for tc in msg.tool_calls if isinstance(tc, dict)
+                ) * 0.3
+            
+            if total + msg_tokens > retain_budget and count >= MIN_RECENT_MESSAGES:
+                break
+            
+            total += msg_tokens
+            count += 1
+        
+        # 至少保留 MIN_RECENT_MESSAGES 条
+        return max(count, MIN_RECENT_MESSAGES)
 
     def estimate_context_tokens(self, messages):
         """估算消息列表的总 token 数"""
@@ -227,12 +355,31 @@ class ContextService:
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, list):
-                # 多模态消息
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "text":
                         total += self.count_tokens(part.get("text", ""))
                     elif isinstance(part, dict) and part.get("type") == "image_url":
-                        total += 85  # 图片大约 85 tokens
+                        total += 85
             else:
                 total += self.count_tokens(str(content))
         return total
+    
+    def get_context_usage_info(self, conversation_id):
+        """获取当前上下文使用率信息（供前端展示）"""
+        conversation = db.session.get(Conversation, conversation_id)
+        if not conversation:
+            return None
+        
+        messages = conversation.messages.filter_by(compressed=False).all()
+        total_tokens = sum(self.count_tokens(m.content or "") for m in messages)
+        
+        return {
+            "model": self.model,
+            "context_window": self._get_model_context_window(self.model),
+            "max_input_tokens": self.max_tokens,
+            "used_tokens": total_tokens,
+            "usage_ratio": round(total_tokens / self.max_tokens, 3) if self.max_tokens > 0 else 0,
+            "message_count": len(messages),
+            "compressed_count": conversation.messages.filter_by(compressed=True).count(),
+            "will_compress": self.should_compress(conversation_id),
+        }
