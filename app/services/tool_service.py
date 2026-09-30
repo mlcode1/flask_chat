@@ -176,6 +176,114 @@ def _build_tools_list(user_id=None):
         }
     })
 
+    # 代码编辑工具（用户有已索引代码库时自动启用）
+    allowed_paths = _get_allowed_paths(user_id)
+    if allowed_paths:
+        repo_list_str = "、".join([os.path.basename(p) for p in allowed_paths])
+        tools.extend([
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_dir",
+                    "description": f"列出目录内容，查看项目结构。路径必须在用户已索引的代码库内。当前可用代码库：{repo_list_str}",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "目录的绝对路径"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_code_file",
+                    "description": "读取代码文件的完整内容。用于查看当前文件内容，以便后续编辑。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "文件的绝对路径"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": f"创建或覆盖写入文件。路径必须在用户已索引的代码库内。当前可用代码库：{repo_list_str}",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "文件的绝对路径"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "要写入的文件内容"
+                            }
+                        },
+                        "required": ["path", "content"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_file",
+                    "description": "局部编辑文件中的指定文本片段。使用 old_text 匹配原文，new_text 替换为目标内容。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "文件的绝对路径"
+                            },
+                            "old_text": {
+                                "type": "string",
+                                "description": "要替换的原始文本片段（精确匹配）"
+                            },
+                            "new_text": {
+                                "type": "string",
+                                "description": "替换后的新文本"
+                            }
+                        },
+                        "required": ["path", "old_text", "new_text"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_shell",
+                    "description": "在指定工作目录下执行 shell 命令。可用于 git 操作、编译构建等。超时时间 30 秒。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "description": "要执行的 shell 命令"
+                            },
+                            "working_dir": {
+                                "type": "string",
+                                "description": "命令执行的工作目录（必须在已索引的代码库内）"
+                            }
+                        },
+                        "required": ["command", "working_dir"]
+                    }
+                }
+            }
+        ])
+
     return tools
 
 
@@ -189,6 +297,9 @@ DANGEROUS_TOOLS = {
     "execute_code": "执行代码可能影响系统安全",
     "query_database": "数据库查询可能访问敏感数据",
     "web_search": "网络搜索可能获取不当内容",
+    "write_file": "写入文件可能修改代码或数据",
+    "edit_file": "编辑文件可能修改代码",
+    "run_shell": "执行 shell 命令可能影响系统安全",
 }
 
 
@@ -227,7 +338,7 @@ def execute_tool(name, arguments, user_id=None):
         # 日志记录完整异常信息
         logger.error(f"工具 '{name}' 执行异常: {e}", exc_info=True)
         # 返回用户友好的错误信息，不暴露技术细节
-        return json.dumps({"error": f"工具执行失败，请稍后重试", "results": []})
+        return json.dumps({"error": f"工具执行失败，请稍后重试", "results": []}, ensure_ascii=False)
 
 
 def _dispatch_tool(name, args, user_id=None):
@@ -256,7 +367,22 @@ def _dispatch_tool(name, args, user_id=None):
     if name == "read_file":
         return _exec_read_file(args)
 
-    return json.dumps({"error": f"未知工具: {name}"})
+    if name == "write_file":
+        return _exec_write_file(args, user_id)
+
+    if name == "edit_file":
+        return _exec_edit_file(args, user_id)
+
+    if name == "run_shell":
+        return _exec_run_shell(args, user_id)
+
+    if name == "list_dir":
+        return _exec_list_dir(args, user_id)
+
+    if name == "read_code_file":
+        return _exec_read_code_file(args, user_id)
+
+    return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
 
 
 # ============================================================
@@ -270,12 +396,12 @@ def _exec_calculate(args):
         # 安全白名单：只允许数字和基本运算符
         allowed = re.compile(r'^[\d\s\+\-\*\/\(\)\.\%\*]+$')
         if not allowed.match(expression):
-            return json.dumps({"error": "表达式包含不允许的字符"})
+            return json.dumps({"error": "表达式包含不允许的字符"}, ensure_ascii=False)
         result = eval(expression, {"__builtins__": {}}, {})
         return json.dumps({"result": result})
     except Exception as e:
         logger.warning(f"计算失败: {e}")
-        return json.dumps({"error": "计算表达式有误，请检查输入"})
+        return json.dumps({"error": "计算表达式有误，请检查输入"}, ensure_ascii=False)
 
 
 def _exec_search_code(args, user_id=None):
@@ -284,7 +410,7 @@ def _exec_search_code(args, user_id=None):
     
     query = args.get("query", "")
     if not query:
-        return json.dumps({"error": "搜索查询不能为空"})
+        return json.dumps({"error": "搜索查询不能为空"}, ensure_ascii=False)
     
     repo = args.get("repo", None)
     
@@ -318,7 +444,7 @@ def _exec_web_search(args):
 
     query = args.get("query", "")
     if not query:
-        return json.dumps({"error": "搜索关键词不能为空"})
+        return json.dumps({"error": "搜索关键词不能为空"}, ensure_ascii=False)
 
     max_results = current_app.config.get("SEARCH_MAX_RESULTS", 5)
     provider = current_app.config.get("WEB_SEARCH_PROVIDER", "duckduckgo")
@@ -476,11 +602,11 @@ def _exec_knowledge_search(args, user_id=None):
 def _exec_code(args):
     """Python 代码执行（沙箱）"""
     if not current_app.config.get("CODE_EXEC_ENABLED", True):
-        return json.dumps({"error": "代码执行未启用"})
+        return json.dumps({"error": "代码执行未启用"}, ensure_ascii=False)
 
     code = args.get("code", "")
     if not code.strip():
-        return json.dumps({"error": "代码不能为空"})
+        return json.dumps({"error": "代码不能为空"}, ensure_ascii=False)
 
     timeout = current_app.config.get("CODE_EXEC_TIMEOUT", 10)
 
@@ -492,7 +618,7 @@ def _exec_code(args):
     ]
     for f in forbidden:
         if f in code:
-            return json.dumps({"error": f"代码包含禁止的操作: {f}"})
+            return json.dumps({"error": f"代码包含禁止的操作: {f}"}, ensure_ascii=False)
 
     # 本地执行
     try:
@@ -518,27 +644,27 @@ def _exec_code(args):
 
     except subprocess.TimeoutExpired:
         os.unlink(tmp_path) if os.path.exists(tmp_path) else None
-        return json.dumps({"error": f"代码执行超时（{timeout}秒）"})
+        return json.dumps({"error": f"代码执行超时（{timeout}秒）"}, ensure_ascii=False)
     except Exception as e:
         logger.warning(f"代码执行失败: {e}")
-        return json.dumps({"error": "代码执行出错", "output": "执行失败，请检查代码语法"})
+        return json.dumps({"error": "代码执行出错", "output": "执行失败，请检查代码语法"}, ensure_ascii=False)
 
 
 def _exec_query_database(args):
     """数据库查询（只读 SELECT，带表级访问控制）"""
     sql = args.get("sql", "").strip()
     if not sql:
-        return json.dumps({"error": "SQL 语句不能为空"})
+        return json.dumps({"error": "SQL 语句不能为空"}, ensure_ascii=False)
 
     # 安全检查：只允许 SELECT
     sql_upper = sql.upper().strip()
     if not sql_upper.startswith("SELECT"):
-        return json.dumps({"error": "仅允许 SELECT 查询"})
+        return json.dumps({"error": "仅允许 SELECT 查询"}, ensure_ascii=False)
 
     forbidden_keywords = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "EXEC", "GRANT", "REVOKE"]
     for kw in forbidden_keywords:
         if kw in sql_upper.split():
-            return json.dumps({"error": f"SQL 包含禁止操作: {kw}"})
+            return json.dumps({"error": f"SQL 包含禁止操作: {kw}"}, ensure_ascii=False)
 
     # 表级访问控制：当代码库查询关闭时，禁止查询代码库相关的表
     if not current_app.config.get("CODE_INDEX_ENABLED", False):
@@ -550,7 +676,7 @@ def _exec_query_database(args):
         sql_lower = sql.lower()
         for table_prefix in code_index_tables:
             if table_prefix in sql_lower:
-                return json.dumps({"error": f"代码库查询功能已关闭，不允许访问 {table_prefix}* 相关表"})
+                return json.dumps({"error": f"代码库查询功能已关闭，不允许访问 {table_prefix}* 相关表"}, ensure_ascii=False)
 
     # 表级访问控制：当知识库查询关闭时，禁止查询知识库相关的表
     if not current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False):
@@ -562,7 +688,7 @@ def _exec_query_database(args):
         for table_name in knowledge_tables:
             # 匹配表名（防止子串匹配，如 "my_documents" 不应被误判）
             if re.search(rf'\b{table_name}\b', sql_lower):
-                return json.dumps({"error": f"知识库查询功能已关闭，不允许访问 {table_name} 表"})
+                return json.dumps({"error": f"知识库查询功能已关闭，不允许访问 {table_name} 表"}, ensure_ascii=False)
 
     try:
         from app.extensions import db
@@ -578,28 +704,28 @@ def _exec_query_database(args):
         # 查询失败时必须 rollback，否则后续所有 SQLAlchemy 操作都会报 InFailedSqlTransaction
         from app.extensions import db
         db.session.rollback()
-        return json.dumps({"error": f"查询失败: {str(e)}"})
+        return json.dumps({"error": f"查询失败: {str(e)}"}, ensure_ascii=False)
 
 
 def _exec_read_file(args):
     """读取知识库中的文件"""
     filename = args.get("filename", "")
     if not filename:
-        return json.dumps({"error": "文件名不能为空"})
+        return json.dumps({"error": "文件名不能为空"}, ensure_ascii=False)
 
     # 安全检查：防止路径遍历
     if ".." in filename or "/" in filename or "\\" in filename:
-        return json.dumps({"error": "无效的文件名"})
+        return json.dumps({"error": "无效的文件名"}, ensure_ascii=False)
 
     # 数据访问层权限控制：知识库查询关闭时，禁止通过 read_file 读取知识库文档
     if not current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False):
-        return json.dumps({"error": "知识库查询功能未启用，无法读取知识库文件"})
+        return json.dumps({"error": "知识库查询功能未启用，无法读取知识库文件"}, ensure_ascii=False)
 
     # 在知识库文档中查找
     from app.models import Document, DocumentChunk
     doc = Document.query.filter_by(filename=filename).first()
     if not doc:
-        return json.dumps({"error": f"文件 {filename} 不在知识库中"})
+        return json.dumps({"error": f"文件 {filename} 不在知识库中"}, ensure_ascii=False)
 
     chunks = DocumentChunk.query.filter_by(document_id=doc.id).order_by(DocumentChunk.chunk_index).all()
     content = "\n".join(c.content for c in chunks)
@@ -608,3 +734,297 @@ def _exec_read_file(args):
         "content": content[:5000],  # 限制返回长度
         "truncated": len(content) > 5000,
     }, ensure_ascii=False)
+
+
+def _get_allowed_paths(user_id):
+    """获取允许的文件操作路径列表 - 只允许用户自己上传的代码库"""
+    if not user_id:
+        return []
+    
+    try:
+        from app.models import CodeRepository
+        # 只查询当前用户拥有且已索引的代码库
+        repos = CodeRepository.query.filter_by(user_id=user_id, status="indexed").all()
+        return [repo.path for repo in repos if repo.path]
+    except Exception as e:
+        logger.error(f"获取用户代码库路径失败: {str(e)}")
+        return []
+
+
+def _resolve_path(file_path, allowed_paths):
+    """解析路径：支持仓库名自动转换为绝对路径。不依赖 prompt，纯代码处理。"""
+    if not file_path:
+        return file_path
+    
+    # 去除前后空格
+    file_path = file_path.strip()
+    
+    # 去除所有前导斜杠，提取纯名称（如 /code_index -> code_index, code_index -> code_index）
+    clean_path = file_path.lstrip(os.sep).lstrip("/")
+    
+    # 尝试在 allowed_paths 中查找匹配的仓库名
+    for allowed in allowed_paths:
+        basename = os.path.basename(allowed.rstrip(os.sep))
+        if clean_path == basename or clean_path.startswith(basename + os.sep) or clean_path.startswith(basename + "/"):
+            # 将仓库名替换为完整路径
+            relative_part = clean_path[len(basename):].lstrip(os.sep).lstrip("/")
+            if relative_part:
+                return os.path.join(allowed, relative_part)
+            else:
+                return allowed
+    
+    return file_path
+
+
+def _validate_path(file_path, allowed_paths):
+    """验证文件路径是否在允许范围内
+    
+    Returns:
+        tuple: (is_valid, error_msg, resolved_path)
+            - is_valid: bool, 是否验证通过
+            - error_msg: str or None, 错误信息
+            - resolved_path: str or None, 解析后的实际路径（验证通过时）
+    """
+    if not allowed_paths:
+        return False, "未配置允许的操作路径", None
+    
+    # 先解析路径（支持仓库名转换）
+    file_path = _resolve_path(file_path, allowed_paths)
+    
+    # 规范化路径
+    try:
+        normalized = os.path.realpath(file_path)
+    except Exception:
+        return False, "无效的文件路径", None
+    
+    # 检查路径遍历攻击
+    if ".." in normalized:
+        return False, "路径包含不允许的遍历操作", None
+    
+    # 检查是否在允许的路径内
+    for allowed in allowed_paths:
+        try:
+            allowed_normalized = os.path.realpath(allowed)
+            if normalized.startswith(allowed_normalized + os.sep) or normalized == allowed_normalized:
+                return True, None, file_path
+        except Exception:
+            continue
+    
+    return False, f"路径不在允许的操作范围内：{file_path}", None
+
+
+def _exec_write_file(args, user_id):
+    """写入文件（创建或覆盖）"""
+    file_path = (args.get("path") or args.get("file_path") or "").strip()
+    content = args.get("content", "")
+    
+    if not file_path:
+        return json.dumps({"error": "文件路径不能为空"}, ensure_ascii=False)
+    
+    # 路径验证 - 只允许用户自己的代码库
+    allowed_paths = _get_allowed_paths(user_id)
+    is_valid, error_msg, file_path = _validate_path(file_path, allowed_paths)
+    if not is_valid:
+        return json.dumps({"error": error_msg}, ensure_ascii=False)
+    
+    try:
+        # 创建目录（如果不存在）
+        dir_path = os.path.dirname(file_path)
+        if dir_path and not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
+        
+        # 写入文件
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        
+        logger.info(f"文件写入成功: {file_path}")
+        return json.dumps({
+            "status": "success",
+            "message": f"文件已写入: {file_path}",
+            "size": len(content)
+        })
+    
+    except Exception as e:
+        logger.error(f"文件写入失败: {file_path}, 错误: {str(e)}")
+        return json.dumps({"error": f"文件写入失败: {str(e)}"}, ensure_ascii=False)
+
+
+def _exec_edit_file(args, user_id):
+    """编辑文件（替换指定文本）"""
+    file_path = (args.get("path") or args.get("file_path") or "").strip()
+    old_text = args.get("old_text", "")
+    new_text = args.get("new_text", "")
+    
+    if not file_path:
+        return json.dumps({"error": "文件路径不能为空"}, ensure_ascii=False)
+    
+    if not old_text:
+        return json.dumps({"error": "原始文本不能为空"}, ensure_ascii=False)
+    
+    # 路径验证
+    allowed_paths = _get_allowed_paths(user_id)
+    is_valid, error_msg, file_path = _validate_path(file_path, allowed_paths)
+    if not is_valid:
+        return json.dumps({"error": error_msg}, ensure_ascii=False)
+    
+    # 检查文件是否存在
+    if not os.path.isfile(file_path):
+        return json.dumps({"error": f"文件不存在: {file_path}"}, ensure_ascii=False)
+    
+    try:
+        # 读取原文件
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # 检查原始文本是否存在
+        if old_text not in content:
+            return json.dumps({
+                "error": "在文件中未找到指定的原始文本",
+                "file_path": file_path
+            })
+        
+        # 替换文本
+        new_content = content.replace(old_text, new_text, 1)  # 只替换第一次出现
+        
+        # 写回文件
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        
+        logger.info(f"文件编辑成功: {file_path}")
+        return json.dumps({
+            "status": "success",
+            "message": f"文件已编辑: {file_path}",
+            "replaced": True
+        })
+    
+    except Exception as e:
+        logger.error(f"文件编辑失败: {file_path}, 错误: {str(e)}")
+        return json.dumps({"error": f"文件编辑失败: {str(e)}"}, ensure_ascii=False)
+
+
+def _exec_run_shell(args, user_id):
+    """执行 shell 命令"""
+    command = args.get("command", "").strip()
+    working_dir = args.get("working_dir", "").strip()
+    
+    if not command:
+        return json.dumps({"error": "命令不能为空"}, ensure_ascii=False)
+    
+    if not working_dir:
+        return json.dumps({"error": "工作目录不能为空"}, ensure_ascii=False)
+    
+    # 路径验证
+    allowed_paths = _get_allowed_paths(user_id)
+    is_valid, error_msg, working_dir = _validate_path(working_dir, allowed_paths)
+    if not is_valid:
+        return json.dumps({"error": error_msg}, ensure_ascii=False)
+    
+    # 危险命令检查
+    dangerous_commands = ["rm -rf /", "sudo", "chmod 777", "dd if="]
+    for cmd in dangerous_commands:
+        if cmd in command.lower():
+            return json.dumps({"error": f"禁止执行危险命令: {cmd}"}, ensure_ascii=False)
+    
+    try:
+        timeout = current_app.config.get("CODE_EDIT_SHELL_TIMEOUT", 30)
+        
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=working_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        
+        logger.info(f"Shell 命令执行完成: {command}")
+        return json.dumps({
+            "status": "success" if result.returncode == 0 else "error",
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "command": command
+        })
+    
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": f"命令执行超时（{timeout}秒）"}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Shell 命令执行失败: {command}, 错误: {str(e)}")
+        return json.dumps({"error": f"命令执行失败: {str(e)}"}, ensure_ascii=False)
+
+
+def _exec_list_dir(args, user_id):
+    """列出目录内容"""
+    dir_path = (args.get("path") or "").strip()
+    
+    if not dir_path:
+        return json.dumps({"error": "目录路径不能为空"}, ensure_ascii=False)
+    
+    # 路径验证
+    allowed_paths = _get_allowed_paths(user_id)
+    is_valid, error_msg, dir_path = _validate_path(dir_path, allowed_paths)
+    if not is_valid:
+        return json.dumps({"error": error_msg}, ensure_ascii=False)
+    
+    if not os.path.isdir(dir_path):
+        return json.dumps({"error": f"目录不存在: {dir_path}"}, ensure_ascii=False)
+    
+    try:
+        items = []
+        for name in sorted(os.listdir(dir_path)):
+            full_path = os.path.join(dir_path, name)
+            is_dir = os.path.isdir(full_path)
+            items.append({
+                "name": name,
+                "type": "directory" if is_dir else "file",
+            })
+        
+        logger.info(f"目录列表成功: {dir_path}, {len(items)}个项目")
+        return json.dumps({
+            "path": dir_path,
+            "items": items
+        }, ensure_ascii=False)
+    
+    except Exception as e:
+        logger.error(f"列出目录失败: {dir_path}, 错误: {str(e)}")
+        return json.dumps({"error": f"列出目录失败: {str(e)}"}, ensure_ascii=False)
+
+
+def _exec_read_code_file(args, user_id):
+    """读取代码文件内容"""
+    file_path = (args.get("path") or "").strip()
+    
+    if not file_path:
+        return json.dumps({"error": "文件路径不能为空"}, ensure_ascii=False)
+    
+    # 路径验证
+    allowed_paths = _get_allowed_paths(user_id)
+    is_valid, error_msg, file_path = _validate_path(file_path, allowed_paths)
+    if not is_valid:
+        return json.dumps({"error": error_msg}, ensure_ascii=False)
+    
+    if not os.path.isfile(file_path):
+        return json.dumps({"error": f"文件不存在: {file_path}"}, ensure_ascii=False)
+    
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        
+        # 限制返回大小
+        max_size = 50000  # 50KB
+        truncated = False
+        if len(content) > max_size:
+            content = content[:max_size]
+            truncated = True
+        
+        logger.info(f"读取代码文件成功: {file_path}, {len(content)}字符")
+        return json.dumps({
+            "path": file_path,
+            "content": content,
+            "size": len(content),
+            "truncated": truncated
+        }, ensure_ascii=False)
+    
+    except Exception as e:
+        logger.error(f"读取代码文件失败: {file_path}, 错误: {str(e)}")
+        return json.dumps({"error": f"读取文件失败: {str(e)}"}, ensure_ascii=False)

@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime
 from openai import OpenAI
 from flask import current_app
 from langsmith import traceable
@@ -85,7 +86,11 @@ class VerifierService:
 
     def _build_prompt(self, question, answer, context):
         ctx_block = f"\n参考上下文：\n{context}\n" if context else ""
+        current_time = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S (%A)")
         return f"""你是一个专业的回答验证助手。请先判断"用户问题 + AI 回答"这一组内容是否需要做事实/逻辑校验，再按要求返回结果。
+
+## 当前时间
+{current_time}
 
 ## 用户问题
 {question}

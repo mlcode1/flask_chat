@@ -38,6 +38,7 @@
     let socket = null;
     let currentMessageId = null;  // 当前正在生成的消息ID
     let currentBubble = null;     // 当前正在显示的气泡
+    let currentRow = null;        // 当前消息行（包含avatar+bubble）
     let fullContent = "";         // 累积的完整内容
     let toolCalls = [];           // 工具调用记录
     
@@ -150,7 +151,7 @@
 
     // 初始化 Socket.IO 连接（带认证）
     function initSocket() {
-        if (socket) return;  // 已连接
+        if (socket) return;
         
         const token = getAuthToken();
         socket = io({
@@ -161,43 +162,45 @@
             auth: token ? { token } : {}
         });
         
-        // 连接成功
         socket.on('connect', () => {
             console.log('WebSocket 已连接');
-            // 如果有当前对话，加入对应的房间
             if (currentConvId) {
                 socket.emit('join', { conversation_id: currentConvId });
             }
         });
         
-        // 连接断开
         socket.on('disconnect', () => {
             console.log('WebSocket 已断开');
         });
+
+        // 核心：更新 bubble 内容（保留工具调用）
+        function renderBubbleContent() {
+            if (!currentBubble) return;
+            currentBubble.innerHTML = formatContent(fullContent);
+            currentBubble.appendChild(createCursor());
+            // 重新渲染工具调用
+            if (toolCalls.length > 0) {
+                renderToolCalls(currentBubble, toolCalls);
+            }
+            scrollToBottom();
+        }
         
         // 接收 token
         socket.on('token', (data) => {
             if (!currentMessageId && currentBubble) {
                 currentMessageId = data.message_id;
-                console.log('[WS] Auto-bound message_id from first token:', currentMessageId);
             }
-            
             if (!currentBubble || currentMessageId !== data.message_id) return;
             
             fullContent += data.token;
-            currentBubble.innerHTML = formatContent(fullContent);
-            currentBubble.appendChild(createCursor());
-            scrollToBottom();
+            renderBubbleContent();
         });
         
         // 接收工具调用
         socket.on('tool_calls', (data) => {
-            // 同样支持自动绑定
             if (!currentMessageId && currentBubble) {
                 currentMessageId = data.message_id;
-                console.log('[WS] Auto-bound message_id from tool_calls:', currentMessageId);
             }
-            
             if (!currentBubble || currentMessageId !== data.message_id) return;
             
             toolCalls = toolCalls.concat(data.tool_calls);
@@ -205,29 +208,95 @@
             scrollToBottom();
         });
         
-        // 生成完成
-        socket.on('generation_completed', (data) => {
-            if (!currentBubble || currentMessageId !== data.message_id) return;
+        // 最终渲染：内容 + 工具调用 + 验证 + 反馈按钮
+        function finalizeBubble(data) {
+            if (!currentBubble) return;
             
-            // 最终全量渲染确保格式正确
+            const savedVerification = currentBubble._verification || null;
+            
+            // 渲染最终内容
             fullContent = data.content;
             currentBubble.innerHTML = formatContent(fullContent);
             
-            // 重置状态
+            // 添加 data-message-id 到 row 和 bubble
+            if (currentRow) {
+                currentRow.setAttribute('data-message-id', data.message_id);
+            }
+            currentBubble.setAttribute('data-message-id', data.message_id);
+            
+            // 重新渲染工具调用
+            if (toolCalls.length > 0) {
+                renderToolCalls(currentBubble, toolCalls);
+            }
+            
+            // 渲染验证结果
+            const verification = data.verification || savedVerification;
+            if (verification) {
+                renderVerification(currentBubble, verification);
+            } else if (verifyEnabled) {
+                const verifyBtn = document.createElement("button");
+                verifyBtn.className = "verify-btn";
+                verifyBtn.textContent = "🔍 结果验证";
+                verifyBtn.onclick = () => manualVerify(data.message_id, currentBubble);
+                currentBubble.appendChild(verifyBtn);
+            }
+            
+            // 添加反馈按钮
+            const feedbackDiv = document.createElement("div");
+            feedbackDiv.className = "feedback-buttons";
+            feedbackDiv.innerHTML = `
+                <button class="feedback-btn like-btn" data-message-id="${data.message_id}" data-feedback="like" title="有帮助">👍</button>
+                <button class="feedback-btn dislike-btn" data-message-id="${data.message_id}" data-feedback="dislike" title="需要改进">👎</button>
+            `;
+            currentBubble.appendChild(feedbackDiv);
+            feedbackDiv.querySelectorAll('.feedback-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    submitFeedback(this.dataset.messageId, this.dataset.feedback, this);
+                });
+            });
+            
+            resetStreamingState();
+            loadTokenStats();
+        }
+        
+        function resetStreamingState() {
+            // 移除 streaming 标记，但保留内容（避免刷新后重复加载）
+            if (currentRow) {
+                currentRow.removeAttribute('data-streaming');
+            }
+            if (currentBubble) {
+                currentBubble.removeAttribute('data-streaming');
+            }
             isStreaming = false;
             sendBtn.disabled = false;
             interruptBtn.style.display = "none";
             currentMessageId = null;
             currentBubble = null;
+            currentRow = null;
             fullContent = "";
             toolCalls = [];
+        }
+        
+        // 生成完成
+        socket.on('generation_completed', (data) => {
+            if (!currentBubble || currentMessageId !== data.message_id) return;
+            finalizeBubble(data);
         });
         
         // 生成被停止
         socket.on('generation_stopped', (data) => {
             if (!currentBubble || currentMessageId !== data.message_id) return;
             
-            // 移除光标，添加已打断标记
+            currentBubble.innerHTML = formatContent(fullContent);
+            if (currentRow) {
+                currentRow.setAttribute('data-message-id', data.message_id);
+            }
+            currentBubble.setAttribute('data-message-id', data.message_id);
+            
+            if (toolCalls.length > 0) {
+                renderToolCalls(currentBubble, toolCalls);
+            }
+            
             const cursor = currentBubble.querySelector('.typing-cursor');
             if (cursor) cursor.remove();
             
@@ -236,36 +305,45 @@
             tag.textContent = "已打断";
             currentBubble.appendChild(tag);
             
-            // 重置状态
-            isStreaming = false;
-            sendBtn.disabled = false;
-            interruptBtn.style.display = "none";
-            currentMessageId = null;
-            currentBubble = null;
-            fullContent = "";
-            toolCalls = [];
+            resetStreamingState();
         });
         
         // 验证开始
         socket.on('verifying', (data) => {
-            if (!currentBubble || currentMessageId !== data.message_id) return;
+            let targetBubble = null;
+            if (currentBubble && currentMessageId === data.message_id) {
+                targetBubble = currentBubble;
+            } else {
+                targetBubble = document.querySelector(`.message-bubble[data-message-id="${data.message_id}"]`);
+            }
+            if (!targetBubble) return;
+            
+            const existing = targetBubble.querySelector('#current-verifying');
+            if (existing) existing.remove();
             
             const indicator = document.createElement("div");
             indicator.className = "verifying-indicator";
             indicator.id = "current-verifying";
             indicator.innerHTML = `<span class="dot-loader"></span><span>正在进行结果验证...</span>`;
-            currentBubble.appendChild(indicator);
+            targetBubble.appendChild(indicator);
             scrollToBottom();
         });
         
         // 验证完成
         socket.on('verified', (data) => {
-            if (!currentBubble || currentMessageId !== data.message_id) return;
+            let targetBubble = null;
+            if (currentBubble && currentMessageId === data.message_id) {
+                targetBubble = currentBubble;
+            } else {
+                targetBubble = document.querySelector(`.message-bubble[data-message-id="${data.message_id}"]`);
+            }
+            if (!targetBubble) return;
             
-            const indicator = document.getElementById("current-verifying");
+            const indicator = targetBubble.querySelector('#current-verifying');
             if (indicator) indicator.remove();
             
-            renderVerification(currentBubble, data.verification);
+            targetBubble._verification = data.verification;
+            renderVerification(targetBubble, data.verification);
             scrollToBottom();
         });
         
@@ -279,28 +357,24 @@
                     <button class="retry-btn">重试</button>
                 </div>`;
             currentBubble.querySelector(".retry-btn").onclick = () => {
-                currentBubble.parentElement.remove();
+                if (currentRow) currentRow.remove();
                 messageInput.value = data.user_content;
                 sendMessage();
             };
             
-            // 重置状态
-            isStreaming = false;
-            sendBtn.disabled = false;
-            interruptBtn.style.display = "none";
-            currentMessageId = null;
-            currentBubble = null;
-            fullContent = "";
-            toolCalls = [];
+            resetStreamingState();
         });
         
         // 恢复中断的生成（断点续传）
         socket.on('generation_resume', (data) => {
-            // 如果当前没有正在进行的生成，但有消息ID，说明是恢复
-            if (!isStreaming && data.message_id) {
+            if (data.message_id && !isStreaming) {
                 currentMessageId = data.message_id;
                 fullContent = data.content || "";
-                currentBubble = createStreamingBubble();
+                toolCalls = [];
+                
+                const { bubble, row } = createStreamingBubbleWithRow();
+                currentBubble = bubble;
+                currentRow = row;
                 
                 if (fullContent) {
                     currentBubble.innerHTML = formatContent(fullContent);
@@ -430,8 +504,27 @@
         const welcome = messagesContainer.querySelector(".welcome-message");
         if (welcome) welcome.remove();
 
+        // 去重：如果已存在相同 ID 的消息，先移除
+        if (messageId) {
+            const existingMsg = messagesContainer.querySelector(`[data-message-id="${messageId}"]`);
+            if (existingMsg) {
+                existingMsg.remove();
+            }
+        }
+
+        // 去重 streaming 行：如果是添加 AI 消息且存在未完成的 streaming 行，先移除
+        if (role === 'assistant') {
+            const streamingRow = messagesContainer.querySelector('[data-streaming="true"]');
+            if (streamingRow) {
+                streamingRow.remove();
+            }
+        }
+
         const row = document.createElement("div");
         row.className = `message-row ${role}`;
+        if (messageId) {
+            row.setAttribute('data-message-id', messageId);
+        }
 
         const avatar = document.createElement("div");
         avatar.className = `avatar ${role}`;
@@ -781,11 +874,23 @@
     }
 
     function createStreamingBubble() {
+        const result = createStreamingBubbleWithRow();
+        return result.bubble;
+    }
+
+    function createStreamingBubbleWithRow() {
         const welcome = messagesContainer.querySelector(".welcome-message");
         if (welcome) welcome.remove();
 
+        // 去重：移除已有的 streaming 行
+        const existingStreaming = messagesContainer.querySelector('.message-row.assistant[data-streaming="true"]');
+        if (existingStreaming) {
+            existingStreaming.remove();
+        }
+
         const row = document.createElement("div");
         row.className = "message-row assistant";
+        row.setAttribute('data-streaming', 'true');
 
         const avatar = document.createElement("div");
         avatar.className = "avatar assistant";
@@ -804,7 +909,7 @@
         row.appendChild(bubble);
         messagesContainer.appendChild(row);
         scrollToBottom();
-        return bubble;
+        return { bubble, row };
     }
 
     async function loadMessages(convId) {
@@ -1196,19 +1301,21 @@
         sendBtn.disabled = true;
         interruptBtn.style.display = "inline-block";
 
-        const bubble = createStreamingBubble();
+        const { bubble, row } = createStreamingBubbleWithRow();
         currentBubble = bubble;
+        currentRow = row;
         fullContent = "";
         toolCalls = [];
 
-        // 确保客户端在对话房间中（新对话创建后可能还没 join）
-        socket.emit('join', { conversation_id: currentConvId });
-
         // 先注册 message_created 监听器，再 emit chat_message
-        // 避免事件在监听器注册前到达导致丢失
         socket.once('message_created', (data) => {
             currentMessageId = data.message_id;
             console.log('[WS] Message created:', currentMessageId);
+            // 标记 streaming 完成，设置 data-message-id
+            if (currentRow) {
+                currentRow.removeAttribute('data-streaming');
+                currentRow.setAttribute('data-message-id', currentMessageId);
+            }
         });
 
         // 通过 WebSocket 发送消息
@@ -1231,6 +1338,10 @@
                         if (lastAssistant) {
                             currentMessageId = lastAssistant.id;
                             console.log('[WS] 轮询获取到 message_id:', currentMessageId);
+                            if (currentRow) {
+                                currentRow.removeAttribute('data-streaming');
+                                currentRow.setAttribute('data-message-id', currentMessageId);
+                            }
                         }
                     })
                     .catch(err => console.error('[WS] 轮询失败:', err));
@@ -2270,8 +2381,14 @@
     function formatNumber(num) {
         if (num === undefined || num === null || isNaN(num)) return '0';
         num = Number(num);
-        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-        if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+        if (num >= 1000000) {
+            const m = num / 1000000;
+            return m >= 100 ? Math.round(m) + 'M' : m.toFixed(1) + 'M';
+        }
+        if (num >= 1000) {
+            const k = num / 1000;
+            return k >= 100 ? Math.round(k) + 'K' : k.toFixed(1) + 'K';
+        }
         return num.toString();
     }
 
@@ -2304,6 +2421,11 @@
                                 <div class="stat-icon">⬆️</div>
                                 <div class="stat-value">${formatNumber(data.total_output_tokens)}</div>
                                 <div class="stat-label">输出 Token</div>
+                            </div>
+                            <div class="stat-card stat-cached">
+                                <div class="stat-icon">💾</div>
+                                <div class="stat-value">${formatNumber(data.total_cached_tokens)}</div>
+                                <div class="stat-label">缓存命中 (${data.cache_hit_rate || 0}%)</div>
                             </div>
                             <div class="stat-card stat-cost">
                                 <div class="stat-icon">💰</div>

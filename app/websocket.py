@@ -169,7 +169,7 @@ def register_handlers(socketio, app):
                 'message_id': msg_id,
                 'user_message_id': user_msg.id,
                 'status': 'generating'
-            })
+            }, room=request.sid)
 
             # 启动后台生成任务（使用 socketio.start_background_task 确保 WebSocket 事件能正常推送）
             room = f"conv_{conv_id}"
@@ -238,7 +238,7 @@ def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, 
             full_content = ''
             last_save_len = 0
             tool_calls_log = []
-            token_usage = {'input': 0, 'output': 0}  # 存储token用量
+            token_usage = {'input': 0, 'output': 0, 'cached': 0}  # 存储token用量
 
             def on_chunk(text):
                 nonlocal full_content, last_save_len
@@ -263,10 +263,11 @@ def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, 
                 tool_calls_log.append(tool_info)
                 _send_tool_calls(room, msg_id, [tool_info])
             
-            def on_usage(input_tokens, output_tokens):
+            def on_usage(input_tokens, output_tokens, cached_tokens=0):
                 """记录token用量"""
                 token_usage['input'] = input_tokens
                 token_usage['output'] = output_tokens
+                token_usage['cached'] = cached_tokens
 
             # 使用 AIService 生成
             ai = AIService(model=model)
@@ -290,7 +291,9 @@ def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, 
                 final_content = full_content or '[已停止]'
                 _finish_generation(msg_id, final_content, room, tool_calls_log,
                                    interrupted=True, user_content=user_content,
-                                   input_tokens=token_usage['input'], output_tokens=token_usage['output'])
+                                   input_tokens=token_usage['input'], 
+                                   output_tokens=token_usage['output'],
+                                   cached_tokens=token_usage['cached'])
             else:
                 # 添加免责声明
                 disclaimer = get_disclaimer()
@@ -302,7 +305,9 @@ def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, 
                 _finish_generation(msg_id, full_content, room, tool_calls_log,
                                    interrupted=False, user_content=user_content,
                                    context_hash=context_hash, cache_enabled=cache_enabled,
-                                   input_tokens=token_usage['input'], output_tokens=token_usage['output'])
+                                   input_tokens=token_usage['input'], 
+                                   output_tokens=token_usage['output'],
+                                   cached_tokens=token_usage['cached'])
 
             logger.info(f"生成完成: message_id={msg_id}, 内容长度={len(full_content)}")
 
@@ -314,7 +319,7 @@ def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, 
 
 def _finish_generation(msg_id, content, room, tool_calls_log, interrupted=False,
                        user_content=None, context_hash=None, cache_enabled=False,
-                       input_tokens=0, output_tokens=0):
+                       input_tokens=0, output_tokens=0, cached_tokens=0):
     """统一的生成完成处理：保存数据库 + 结果验证 + 通知客户端。
     无论是正常完成、被中断、还是出错，都只调用此函数一次。"""
     from app import socketio
@@ -326,7 +331,7 @@ def _finish_generation(msg_id, content, room, tool_calls_log, interrupted=False,
 
     # 保存到数据库
     try:
-        logger.info(f"保存生成结果: message_id={msg_id}, content_len={len(content)}, status={status}, input_tokens={input_tokens}, output_tokens={output_tokens}")
+        logger.info(f"保存生成结果: message_id={msg_id}, content_len={len(content)}, status={status}, input_tokens={input_tokens}, output_tokens={output_tokens}, cached_tokens={cached_tokens}")
         msg = db.session.get(Message, msg_id)
         if msg:
             msg.content = content
@@ -335,6 +340,7 @@ def _finish_generation(msg_id, content, room, tool_calls_log, interrupted=False,
             msg.tool_calls = tool_calls_log or []
             msg.input_tokens = input_tokens
             msg.output_tokens = output_tokens
+            msg.cached_tokens = cached_tokens
             msg.token_count = input_tokens + output_tokens  # 总数
             db.session.commit()
             logger.info(f"生成结果已保存到数据库: message_id={msg_id}")

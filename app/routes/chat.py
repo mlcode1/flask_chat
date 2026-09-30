@@ -246,12 +246,23 @@ def get_token_usage_stats():
         query = query.filter(Message.created_at >= datetime.utcnow() - timedelta(days=30))
     # "all" 不过滤
     
-    # 统计总量
+    # 统计总量 - 每条消息的token数取 input+output 和 token_count 的较大值（兼容旧数据）
+    from sqlalchemy import func, case, literal
+    # 每条消息的实际token数：如果有input+output则用它，否则用token_count
+    msg_tokens = func.coalesce(
+        func.greatest(
+            func.coalesce(Message.input_tokens, 0) + func.coalesce(Message.output_tokens, 0),
+            func.coalesce(Message.token_count, 0)
+        ),
+        0
+    )
+    
     stats = query.with_entities(
         func.count(Message.id).label("total_messages"),
         func.sum(Message.input_tokens).label("total_input_tokens"),
         func.sum(Message.output_tokens).label("total_output_tokens"),
-        func.sum(Message.token_count).label("total_tokens")
+        func.sum(Message.cached_tokens).label("total_cached_tokens"),
+        func.sum(msg_tokens).label("total_tokens")
     ).first()
     
     # 按日期分组统计（最近7天）
@@ -278,15 +289,19 @@ def get_token_usage_stats():
     
     total_in = stats.total_input_tokens or 0
     total_out = stats.total_output_tokens or 0
-    # 优先使用 input+output，如果为0则回退到 token_count (兼容旧数据)
-    calculated_total = total_in + total_out
-    final_total = calculated_total if calculated_total > 0 else (stats.total_tokens or 0)
+    total_cached = stats.total_cached_tokens or 0
+    final_total = stats.total_tokens or 0
+    
+    # 缓存命中率
+    cache_hit_rate = round(total_cached / total_in * 100, 1) if total_in > 0 else 0
     
     return jsonify({
         "total_messages": stats.total_messages or 0,
         "total_input_tokens": total_in,
         "total_output_tokens": total_out,
+        "total_cached_tokens": total_cached,
         "total_tokens": final_total,
+        "cache_hit_rate": cache_hit_rate,
         "estimated_cost": final_total * 0.00003,
         "daily_stats": daily_stats,
         "period": period

@@ -79,6 +79,10 @@ class Config:
 
     # Code Index (代码索引集成)
     CODE_INDEX_ENABLED = os.getenv("CODE_INDEX_ENABLED", "false").lower() == "true"
+
+    # Code Editor (代码编辑工具 - AI 可直接读写代码文件)
+    CODE_EDIT_ENABLED = os.getenv("CODE_EDIT_ENABLED", "false").lower() == "true"
+    CODE_EDIT_SHELL_TIMEOUT = int(os.getenv("CODE_EDIT_SHELL_TIMEOUT", "30"))
     CODE_INDEX_DB_HOST = os.getenv("CODE_INDEX_DB_HOST", "localhost")
     CODE_INDEX_DB_PORT = int(os.getenv("CODE_INDEX_DB_PORT", "5432"))
     CODE_INDEX_DB_USER = os.getenv("CODE_INDEX_DB_USER", "postgres")

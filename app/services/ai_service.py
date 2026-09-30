@@ -60,12 +60,13 @@ class AIService:
         """流式响应，支持token用量统计
         
         Args:
-            on_usage: 回调函数，接收 (input_tokens, output_tokens) 参数
+            on_usage: 回调函数，接收 (input_tokens, output_tokens, cached_tokens) 参数
         """
         full_content = ""
         tool_calls_accumulator = {}
         total_input_tokens = 0
         total_output_tokens = 0
+        total_cached_tokens = 0  # 缓存命中的token数
 
         while True:
             if stop_event and stop_event.is_set():
@@ -108,7 +109,7 @@ class AIService:
             for chunk in response:
                 if stop_event and stop_event.is_set():
                     if on_usage:
-                        on_usage(total_input_tokens, total_output_tokens)
+                        on_usage(total_input_tokens, total_output_tokens, total_cached_tokens)
                     yield "[已打断]"
                     return
 
@@ -116,6 +117,11 @@ class AIService:
                 if hasattr(chunk, 'usage') and chunk.usage:
                     total_input_tokens += chunk.usage.prompt_tokens
                     total_output_tokens += chunk.usage.completion_tokens
+                    # 安全获取cached_tokens，兼容不提供此字段的提供商
+                    if hasattr(chunk.usage, 'prompt_tokens_details') and chunk.usage.prompt_tokens_details:
+                        cached = getattr(chunk.usage.prompt_tokens_details, 'cached_tokens', 0)
+                        if cached:
+                            total_cached_tokens += cached
 
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if not delta:
@@ -214,7 +220,7 @@ class AIService:
         
         # 正常结束时回调usage数据
         if on_usage:
-            on_usage(total_input_tokens, total_output_tokens)
+            on_usage(total_input_tokens, total_output_tokens, total_cached_tokens)
 
     @traceable(name="chat_sync_complete", run_type="llm")
     def sync_complete(self, prompt, system_prompt=None):

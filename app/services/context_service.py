@@ -174,9 +174,30 @@ class ContextService:
         """构建系统上下文：对话模板系统提示 + 工具状态 + 摘要 + 长期记忆"""
         parts = []
         
+        # 0. 默认系统提示（当没有模板系统提示时，提供基础指引）
+        default_prompt = """你是一个智能助手，具备以下工具能力：
+- **calculate**: 执行数学计算。当用户提出计算问题时，请始终使用此工具而非自行计算。
+- **get_current_time**: 获取当前日期和时间。
+- **execute_code**: 执行 Python 代码。当用户需要数据分析、文本处理或复杂计算时，请使用此工具。
+- **query_database**: 执行只读 SQL 查询。
+- **read_file**: 读取知识库中的文件。
+- **list_dir**: 列出目录内容，查看项目结构（仅当用户有已索引代码库时可用）。
+- **read_code_file**: 读取代码文件的完整内容（仅当用户有已索引代码库时可用）。
+- **write_file**: 创建或覆盖写入文件（仅当用户有已索引代码库时可用）。
+- **edit_file**: 局部编辑文件中的指定文本片段（仅当用户有已索引代码库时可用）。
+- **run_shell**: 执行 shell 命令，用于 git 操作、编译构建等（仅当用户有已索引代码库时可用）。
+
+重要原则：
+1. 当有对应工具可用时，始终优先使用工具而非自行处理。
+2. 数学计算务必使用 calculate 工具，不要自行计算。
+3. 回复使用中文，除非用户要求其他语言。
+4. 如果用户要求修改代码文件，先使用 read_code_file 查看当前内容，再使用 edit_file 或 write_file 修改。"""
+
         # 1. 优先使用对话模板的系统提示词
         if conversation.system_prompt:
             parts.append(conversation.system_prompt)
+        else:
+            parts.append(default_prompt)
         
         # 2. 添加工具状态提示（动态告知 LLM 当前可用的功能）
         knowledge_enabled = current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False)
