@@ -56,11 +56,13 @@ class AIService:
         raise last_exception
 
     @traceable(name="chat_stream_response", run_type="llm")
-    def stream_response(self, messages, on_chunk=None, on_tool_call=None, stop_event=None, on_confirm_request=None, conversation_id=None, user_id=None, on_usage=None):
+    def stream_response(self, messages, on_chunk=None, on_tool_call=None, stop_event=None, on_confirm_request=None, conversation_id=None, user_id=None, on_usage=None, on_reset_content=None):
         """流式响应，支持token用量统计
         
         Args:
             on_usage: 回调函数，接收 (input_tokens, output_tokens, cached_tokens) 参数
+            on_reset_content: 回调函数，工具调用完成、开启下一轮前调用，
+                              用于通知外层丢弃本轮引导性正文，只保留最后一轮为正式答案
         """
         full_content = ""
         tool_calls_accumulator = {}
@@ -214,6 +216,12 @@ class AIService:
                     "tool_call_id": tc["id"],
                     "content": result,
                 })
+
+            # 工具已执行完毕，即将开启下一轮 LLM 调用。
+            # 本轮正文属于"工具调用引导语"，不是最终答案，通知外层丢弃，
+            # 避免引导语与工具返回后的最终答案拼在一起造成重复。
+            if full_content and on_reset_content:
+                on_reset_content()
 
             full_content = ""
             tool_calls_accumulator = {}

@@ -196,6 +196,13 @@
             renderBubbleContent();
         });
         
+        // 工具调用完成、开启下一轮答案：清空引导性正文，保留工具调用卡片
+        socket.on('content_reset', (data) => {
+            if (!currentBubble || currentMessageId !== data.message_id) return;
+            fullContent = "";
+            renderBubbleContent();
+        });
+
         // 接收工具调用
         socket.on('tool_calls', (data) => {
             if (!currentMessageId && currentBubble) {

@@ -269,6 +269,16 @@ def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, 
                 token_usage['output'] = output_tokens
                 token_usage['cached'] = cached_tokens
 
+            def on_reset_content():
+                """工具调用完成、开启下一轮前：丢弃本轮引导性正文，只保留最终轮答案"""
+                nonlocal full_content, last_save_len
+                full_content = ''
+                last_save_len = 0
+                if msg_id in _active_generations:
+                    _active_generations[msg_id]['content'] = ''
+                _save_progress(msg_id, '')
+                _reset_content(room, msg_id)
+
             # 使用 AIService 生成
             ai = AIService(model=model)
             for token in ai.stream_response(
@@ -278,7 +288,8 @@ def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, 
                 stop_event=stop_event,
                 conversation_id=conv_id,
                 user_id=user_id,
-                on_usage=on_usage
+                on_usage=on_usage,
+                on_reset_content=on_reset_content
             ):
                 if stop_event.is_set():
                     break
@@ -440,6 +451,15 @@ def _send_tool_calls(room, msg_id, tool_calls):
     socketio.emit('tool_calls', {
         'message_id': msg_id,
         'tool_calls': tool_calls
+    }, room=room)
+
+
+def _reset_content(room, msg_id):
+    """通知客户端清空当前已累积的正文（工具调用后开启新一轮答案时使用）。
+    工具调用卡片由前端自行保留，不受影响。"""
+    from app import socketio
+    socketio.emit('content_reset', {
+        'message_id': msg_id
     }, room=room)
 
 
