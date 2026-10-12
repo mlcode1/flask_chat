@@ -1,4 +1,5 @@
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -104,7 +105,14 @@ class Config:
     
     # MCP (Model Context Protocol)
     MCP_ENABLED = os.getenv("MCP_ENABLED", "false").lower() == "true"
-    MCP_SERVERS = os.getenv("MCP_SERVERS", "")  # JSON string or comma-separated names
+    # MCP_SERVERS_CONFIG 为 JSON 字符串，结构: {"服务器名": {transport/command/args/env 或 url/headers}}
+    MCP_SERVERS_CONFIG = {}
+    _raw_mcp_servers = os.getenv("MCP_SERVERS_CONFIG", "").strip()
+    if _raw_mcp_servers:
+        try:
+            MCP_SERVERS_CONFIG = json.loads(_raw_mcp_servers)
+        except (json.JSONDecodeError, TypeError) as e:
+            print(f"⚠️ MCP_SERVERS_CONFIG JSON 解析失败: {e}")
 
     # Logging (结构化日志)
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
