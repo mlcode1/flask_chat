@@ -22,3 +22,6 @@ llama-index-embeddings-ollama>=0.1.0
 llama-index-vector-stores-postgres>=0.1.0
 tree-sitter>=0.21.0
 tree-sitter-python>=0.21.0
+
+# MCP (Model Context Protocol)
+mcp>=1.0.0

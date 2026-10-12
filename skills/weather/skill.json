@@ -1,0 +1,10 @@
+{
+  "name": "weather",
+  "version": "1.0.0",
+  "description": "天气查询技能",
+  "author": "System",
+  "config": {
+    "api_provider": "mock",
+    "default_unit": "celsius"
+  }
+}

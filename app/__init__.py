@@ -2,6 +2,8 @@ from flask import Flask
 from flask_cors import CORS
 from flask_socketio import SocketIO
 from dotenv import load_dotenv
+import json
+import logging
 
 # 加载环境变量（确保 LangSmith 等配置在任何其他导入前加载）
 load_dotenv()
@@ -17,10 +19,14 @@ from app.routes.template import template_bp
 from app.routes.webhook import webhook_bp
 from app.routes.agent import agent_bp
 from app.routes.speech import speech_bp
+from app.routes.skills import skills_bp
 from app.errors import register_error_handlers
 from app.services.cache_service import init_cache_service
 from app.logging_config import setup_logging, log_request_start, log_request_end
 from app import monitoring
+from app.services.tool_service import get_skill_loader, get_mcp_manager
+
+logger = logging.getLogger(__name__)
 
 # 全局 SocketIO 实例
 socketio = SocketIO()
@@ -47,6 +53,7 @@ def create_app():
     app.register_blueprint(webhook_bp)
     app.register_blueprint(agent_bp)
     app.register_blueprint(speech_bp)
+    app.register_blueprint(skills_bp)
     
     # 注册请求追踪钩子
     @app.before_request
@@ -111,6 +118,38 @@ def create_app():
 
         # 初始化缓存服务
         init_cache_service()
+
+        # 初始化 Skill 系统
+        if app.config.get('SKILLS_ENABLED', True):
+            try:
+                skill_loader = get_skill_loader()
+                skill_loader.load_all_skills()
+                print(f"✅ Skill 系统已初始化，加载了 {len(skill_loader.skills)} 个技能")
+            except Exception as e:
+                print(f"⚠️ Skill 系统初始化失败: {e}")
+                logger.error(f"Failed to initialize skill system: {e}", exc_info=True)
+
+        # 初始化 MCP 客户端
+        if app.config.get('MCP_ENABLED', False):
+            try:
+                mcp_servers_config = app.config.get('MCP_SERVERS_CONFIG', {})
+                if mcp_servers_config:
+                    mcp_manager = get_mcp_manager()
+                    # 在应用上下文中连接 MCP 服务器
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(mcp_manager.connect_all(mcp_servers_config))
+                        connected = mcp_manager.get_connected_servers()
+                        print(f"✅ MCP 系统已初始化，连接了 {len(connected)} 个服务器")
+                    finally:
+                        loop.close()
+                else:
+                    print("ℹ️ MCP 已启用但未配置服务器")
+            except Exception as e:
+                print(f"⚠️ MCP 系统初始化失败: {e}")
+                logger.error(f"Failed to initialize MCP system: {e}", exc_info=True)
 
         # 创建默认对话模板
         from app.services.template_service import create_default_templates

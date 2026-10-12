@@ -1,0 +1,10 @@
+{
+  "name": "calculate",
+  "version": "1.0.0",
+  "description": "数学计算技能",
+  "author": "System",
+  "config": {
+    "precision": 2,
+    "allow_complex": false
+  }
+}

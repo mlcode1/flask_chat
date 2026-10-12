@@ -1,6 +1,6 @@
 """
 工具服务：定义 AI 可调用的工具，并提供执行逻辑
-新增：代码执行、数据库查询、文件操作工具
+支持：内置工具 + Skill 技能 + MCP 服务器
 """
 import json
 import logging
@@ -13,6 +13,38 @@ from datetime import datetime
 from flask import current_app
 
 logger = logging.getLogger(__name__)
+
+# ========== Skill 和 MCP 全局实例 ==========
+_skill_loader = None
+_mcp_manager = None
+
+
+def _get_skill_loader():
+    """获取 Skill Loader 单例"""
+    global _skill_loader
+    if _skill_loader is None:
+        from app.skills.loader import SkillLoader
+        _skill_loader = SkillLoader(skills_dir="skills")
+    return _skill_loader
+
+
+def _get_mcp_manager():
+    """获取 MCP Client Manager 单例"""
+    global _mcp_manager
+    if _mcp_manager is None:
+        from app.mcp.client_manager import MCPClientManager
+        _mcp_manager = MCPClientManager()
+    return _mcp_manager
+
+
+def get_skill_loader():
+    """公开接口：获取 Skill Loader"""
+    return _get_skill_loader()
+
+
+def get_mcp_manager():
+    """公开接口：获取 MCP Manager"""
+    return _get_mcp_manager()
 
 
 def _build_tools_list(user_id=None):
@@ -288,8 +320,43 @@ def _build_tools_list(user_id=None):
 
 
 def get_tools(user_id=None):
-    """获取工具列表（每次调用都重新构建，以支持运行时开关）"""
-    return _build_tools_list(user_id)
+    """
+    获取工具列表（整合内置工具 + Skill + MCP）
+    
+    Args:
+        user_id: 用户ID（用于代码索引等用户相关工具）
+    
+    Returns:
+        List[Dict]: 工具定义列表
+    """
+    tools = []
+    
+    # 1. 添加内置工具
+    builtin_tools = _build_tools_list(user_id)
+    tools.extend(builtin_tools)
+    
+    # 2. 添加 Skill 工具（如果启用）
+    if current_app.config.get('SKILLS_ENABLED', True):
+        try:
+            skill_loader = _get_skill_loader()
+            skill_tools = skill_loader.get_all_tools()
+            tools.extend(skill_tools)
+            logger.debug(f"Added {len(skill_tools)} tools from skills")
+        except Exception as e:
+            logger.error(f"Failed to load skill tools: {e}", exc_info=True)
+    
+    # 3. 添加 MCP 工具（如果启用）
+    if current_app.config.get('MCP_ENABLED', False):
+        try:
+            mcp_manager = _get_mcp_manager()
+            mcp_tools = mcp_manager.get_all_tools()
+            tools.extend(mcp_tools)
+            logger.debug(f"Added {len(mcp_tools)} tools from MCP servers")
+        except Exception as e:
+            logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
+    
+    logger.debug(f"Total tools available: {len(tools)} (builtin: {len(builtin_tools)})")
+    return tools
 
 
 # 危险工具列表：这些工具执行前需要用户确认
@@ -314,7 +381,14 @@ def get_dangerous_tool_reason(tool_name):
 
 
 def execute_tool(name, arguments, user_id=None):
-    """执行工具调用"""
+    """
+    执行工具调用（支持内置工具 + Skill + MCP）
+    
+    工具名称格式：
+    - 内置工具：get_current_time, calculate, web_search 等
+    - Skill 工具：skill_name__tool_name（如 weather__get_current_weather）
+    - MCP 工具：server_name__tool_name（如 github__create_issue）
+    """
     args = json.loads(arguments) if isinstance(arguments, str) else arguments
 
     # 确保 session 干净：如果之前有工具执行失败导致事务异常，先 rollback
@@ -326,8 +400,51 @@ def execute_tool(name, arguments, user_id=None):
         pass
 
     try:
-        result = _dispatch_tool(name, args, user_id=user_id)
-        return result
+        # 检查是否是 Skill 工具（格式：skill_name__tool_name）
+        if '__' in name and not name.startswith('mcp_'):
+            skill_name, tool_name = name.split('__', 1)
+            logger.info(f"Executing skill tool: {skill_name}.{tool_name}")
+            
+            try:
+                skill_loader = _get_skill_loader()
+                result = skill_loader.execute_tool(tool_name, args, skill_name)
+                return result
+            except Exception as e:
+                logger.error(f"Skill tool execution failed: {e}", exc_info=True)
+                return json.dumps({"error": f"技能工具执行失败: {str(e)}"}, ensure_ascii=False)
+        
+        # 检查是否是 MCP 工具（格式：mcp_server_name__tool_name）
+        elif name.startswith('mcp_'):
+            mcp_manager = _get_mcp_manager()
+            if not mcp_manager:
+                return json.dumps({"error": "MCP 系统未启用"}, ensure_ascii=False)
+            
+            logger.info(f"Executing MCP tool: {name}")
+            try:
+                # MCP 工具调用是异步的，需要获取事件循环
+                import asyncio
+                
+                # 尝试获取当前事件循环，如果不存在则创建新的
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                result = loop.run_until_complete(mcp_manager.execute_tool(name, args))
+                return result
+            except Exception as e:
+                logger.error(f"MCP tool execution failed: {e}", exc_info=True)
+                return json.dumps({"error": f"MCP 工具执行失败: {str(e)}"}, ensure_ascii=False)
+        
+        # 否则执行内置工具
+        else:
+            result = _dispatch_tool(name, args, user_id=user_id)
+            return result
+        
     except Exception as e:
         # 工具执行异常时 rollback，防止后续工具连锁报 InFailedSqlTransaction
         try:

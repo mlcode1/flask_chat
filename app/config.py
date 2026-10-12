@@ -98,6 +98,14 @@ class Config:
     CODE_INDEX_SUPPORTED_EXTS = [ext.strip() for ext in os.getenv("CODE_INDEX_SUPPORTED_EXTS", ".py,.js,.ts,.tsx,.jsx,.java,.go,.rs,.cpp,.c,.h,.md,.txt,.json,.yaml,.yml").split(",")]
     CODE_INDEX_EXCLUDE_PATTERNS = [pattern.strip() for pattern in os.getenv("CODE_INDEX_EXCLUDE_PATTERNS", ".git,__pycache__,node_modules,venv,.venv,dist,build,*.pyc,.DS_Store").split(",")]
 
+    # Skills System (技能系统)
+    SKILLS_ENABLED = os.getenv("SKILLS_ENABLED", "true").lower() == "true"
+    SKILLS_DIR = os.getenv("SKILLS_DIR", "skills")
+    
+    # MCP (Model Context Protocol)
+    MCP_ENABLED = os.getenv("MCP_ENABLED", "false").lower() == "true"
+    MCP_SERVERS = os.getenv("MCP_SERVERS", "")  # JSON string or comma-separated names
+
     # Logging (结构化日志)
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FORMAT = os.getenv("LOG_FORMAT", "human")  # 'human' or 'json'
