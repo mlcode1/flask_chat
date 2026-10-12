@@ -57,23 +57,6 @@ def _build_tools_list(user_id=None):
                 "description": "获取当前日期和时间",
                 "parameters": {"type": "object", "properties": {}, "required": []}
             }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "calculate",
-                "description": "执行数学计算",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "expression": {
-                            "type": "string",
-                            "description": "数学表达式，例如 '2 + 3 * 4'"
-                        }
-                    },
-                    "required": ["expression"]
-                }
-            }
         }
     ]
 
@@ -463,9 +446,6 @@ def _dispatch_tool(name, args, user_id=None):
     if name == "get_current_time":
         return json.dumps({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
 
-    if name == "calculate":
-        return _exec_calculate(args)
-
     if name == "web_search":
         return _exec_web_search(args)
 
@@ -505,21 +485,6 @@ def _dispatch_tool(name, args, user_id=None):
 # ============================================================
 # 工具实现
 # ============================================================
-
-def _exec_calculate(args):
-    """数学计算（安全的 eval）"""
-    try:
-        expression = args["expression"]
-        # 安全白名单：只允许数字和基本运算符
-        allowed = re.compile(r'^[\d\s\+\-\*\/\(\)\.\%\*]+$')
-        if not allowed.match(expression):
-            return json.dumps({"error": "表达式包含不允许的字符"}, ensure_ascii=False)
-        result = eval(expression, {"__builtins__": {}}, {})
-        return json.dumps({"result": result})
-    except Exception as e:
-        logger.warning(f"计算失败: {e}")
-        return json.dumps({"error": "计算表达式有误，请检查输入"}, ensure_ascii=False)
-
 
 def _exec_search_code(args, user_id=None):
     """代码库向量搜索"""

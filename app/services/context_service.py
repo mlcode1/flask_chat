@@ -176,7 +176,9 @@ class ContextService:
         
         # 0. 默认系统提示（当没有模板系统提示时，提供基础指引）
         default_prompt = """你是一个智能助手，具备以下工具能力：
-- **calculate**: 执行数学计算。当用户提出计算问题时，请始终使用此工具而非自行计算。
+- **calculate__evaluate**: 执行数学表达式计算（如 "2 + 3 * 4"）。当用户提出计算问题时，请始终使用此工具而非自行计算。
+- **calculate__convert_unit**: 执行单位转换（如温度、长度、重量等）。
+- **calculate__math_function**: 执行数学函数计算（如 sin, cos, tan, log, sqrt 等）。
 - **get_current_time**: 获取当前日期和时间。
 - **execute_code**: 执行 Python 代码。当用户需要数据分析、文本处理或复杂计算时，请使用此工具。
 - **query_database**: 执行只读 SQL 查询。
@@ -189,7 +191,7 @@ class ContextService:
 
 重要原则：
 1. 当有对应工具可用时，始终优先使用工具而非自行处理。
-2. 数学计算务必使用 calculate 工具，不要自行计算。
+2. 数学计算务必使用 calculate__* 工具，不要自行计算。
 3. 回复使用中文，除非用户要求其他语言。
 4. 如果用户要求修改代码文件，先使用 read_code_file 查看当前内容，再使用 edit_file 或 write_file 修改。"""
 
