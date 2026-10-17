@@ -4,6 +4,7 @@ from flask_socketio import SocketIO
 from dotenv import load_dotenv
 import json
 import logging
+import atexit
 
 # 加载环境变量（确保 LangSmith 等配置在任何其他导入前加载）
 load_dotenv()
@@ -166,5 +167,17 @@ def create_app():
     # 注册 WebSocket 事件处理器
     from app import websocket
     websocket.register_handlers(socketio, app)
+
+    # 注册退出清理钩子
+    def cleanup():
+        try:
+            mcp_manager = get_mcp_manager()
+            if mcp_manager:
+                mcp_manager.disconnect_all_sync()
+                logger.info("MCP 客户端已清理")
+        except Exception as e:
+            logger.warning(f"退出清理时 MCP 清理失败: {e}")
+    
+    atexit.register(cleanup)
 
     return app

@@ -64,9 +64,7 @@ class MCPServerConnection:
         self.session: Optional[ClientSession] = None
         self.tools: List[Dict[str, Any]] = []
         self._connected = False
-        # stdio 上下文管理器，disconnect 时用来 __aexit__
-        self._stdio_ctx = None
-        self._sse_ctx = None
+        self._stop_event: Optional[asyncio.Event] = None
 
     async def connect(self) -> bool:
         """连接服务器并拉取工具列表"""
@@ -75,27 +73,47 @@ class MCPServerConnection:
             return False
 
         try:
+            self._stop_event = asyncio.Event()
+            
+            # 在后台任务中启动连接
             if self.transport == 'stdio':
-                await self._connect_stdio()
+                connect_task = asyncio.create_task(self._connect_stdio())
             elif self.transport == 'sse':
-                await self._connect_sse()
+                connect_task = asyncio.create_task(self._connect_sse())
             else:
                 logger.error(f"Unsupported transport: {self.transport}")
                 return False
-
-            await self._list_tools()
-            self._connected = True
-            logger.debug(f"Connected to MCP server: {self.name} ({len(self.tools)} tools)")
-            return True
+            
+            # 等待连接就绪（最多等待 30 秒）
+            for _ in range(300):
+                if self._connected:
+                    return True
+                if connect_task.done():
+                    # 任务完成但连接未建立，说明失败了
+                    try:
+                        await connect_task
+                    except Exception as e:
+                        logger.error(f"Connect task failed: {e}")
+                    return False
+                await asyncio.sleep(0.1)
+            
+            logger.error(f"Timeout waiting for MCP server {self.name} to connect")
+            return False
+            
         except Exception as e:
             logger.error(f"Failed to connect to MCP server {self.name}: {e}", exc_info=True)
+            self._connected = False
             return False
 
     async def _connect_stdio(self):
-        """通过 stdio 连接到 MCP 服务器"""
+        """通过 stdio 连接到 MCP 服务器（在后台任务中运行）"""
+        import os
+        
         command = self.config.get('command')
         args = self.config.get('args', [])
-        env = self.config.get('env', {}) or None
+        # 合并环境变量：继承父进程环境 + 配置中的额外变量
+        config_env = self.config.get('env', {}) or {}
+        env = {**os.environ, **config_env} if config_env else None
 
         if not command:
             raise ValueError("stdio transport requires 'command' parameter")
@@ -106,28 +124,44 @@ class MCPServerConnection:
             env=env
         )
 
-        # stdio_client 是 async context manager，进入后得到 (read, write) 元组
-        self._stdio_ctx = stdio_client(server_params)
-        streams = await self._stdio_ctx.__aenter__()
-        read_stream, write_stream = streams[0], streams[1]
-
-        self.session = ClientSession(read_stream, write_stream)
-        await self.session.initialize()
+        async with stdio_client(server_params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                self.session = session
+                
+                await self._list_tools()
+                self._connected = True
+                logger.info(f"Connected to MCP server: {self.name} ({len(self.tools)} tools)")
+                
+                await self._stop_event.wait()
+                
+                self._connected = False
+                self.session = None
 
     async def _connect_sse(self):
-        """通过 SSE 连接到 MCP 服务器"""
+        """通过 SSE 连接到 MCP 服务器（在后台任务中运行）"""
         url = self.config.get('url')
         headers = self.config.get('headers', {})
 
         if not url:
             raise ValueError("sse transport requires 'url' parameter")
 
-        self._sse_ctx = sse_client(url, headers=headers)
-        streams = await self._sse_ctx.__aenter__()
-        read_stream, write_stream = streams[0], streams[1]
-
-        self.session = ClientSession(read_stream, write_stream)
-        await self.session.initialize()
+        # 使用 async with 自动管理上下文
+        async with sse_client(url, headers=headers) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                self.session = session
+                
+                # 拉取工具列表
+                await self._list_tools()
+                self._connected = True
+                logger.debug(f"Connected to MCP server: {self.name} ({len(self.tools)} tools)")
+                
+                # 保持连接活跃，直到收到停止信号
+                await self._stop_event.wait()
+                
+                self._connected = False
+                self.session = None
 
     async def _list_tools(self):
         """拉取工具列表并转换为 OpenAI function calling 格式"""
@@ -135,8 +169,9 @@ class MCPServerConnection:
             response = await self.session.list_tools()
             self.tools = []
             for tool in response.tools:
-                schema = tool.inputSchema if hasattr(tool, 'inputSchema') else {}
-                if schema is None:
+                # MCP SDK uses snake_case: input_schema (not inputSchema)
+                schema = getattr(tool, 'input_schema', None) or {}
+                if not isinstance(schema, dict):
                     schema = {}
                 tool_def = {
                     "type": "function",
@@ -151,7 +186,7 @@ class MCPServerConnection:
                     }
                 }
                 self.tools.append(tool_def)
-                logger.debug(f"Discovered MCP tool: {tool_def['function']['name']}")
+                logger.debug(f"Discovered MCP tool: {tool_def['function']['name']} with {len(schema.get('properties', {}))} params")
         except Exception as e:
             logger.error(f"Failed to list tools from {self.name}: {e}", exc_info=True)
 
@@ -180,19 +215,12 @@ class MCPServerConnection:
             return json.dumps({"error": error_msg}, ensure_ascii=False)
 
     async def disconnect(self):
-        """断开连接"""
-        try:
-            if self._stdio_ctx:
-                await self._stdio_ctx.__aexit__(None, None, None)
-                self._stdio_ctx = None
-            if self._sse_ctx:
-                await self._sse_ctx.__aexit__(None, None, None)
-                self._sse_ctx = None
-        except Exception as e:
-            logger.warning(f"Error closing MCP transport for {self.name}: {e}")
-
-        self.session = None
+        """断开连接 - 只需要设置停止信号，async with 会自动清理资源"""
+        if self._stop_event:
+            self._stop_event.set()
+        
         self._connected = False
+        self.session = None
         logger.debug(f"Disconnected from MCP server: {self.name}")
 
     @property

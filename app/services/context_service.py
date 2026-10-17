@@ -201,6 +201,24 @@ class ContextService:
         else:
             parts.append(default_prompt)
         
+        # 1.5 动态添加 MCP 工具说明（如果有已连接的 MCP 服务器）
+        mcp_enabled = current_app.config.get("MCP_ENABLED", False)
+        if mcp_enabled:
+            try:
+                from app.services.tool_service import get_mcp_manager
+                mcp_manager = get_mcp_manager()
+                mcp_tools = mcp_manager.get_all_tools()
+                if mcp_tools:
+                    mcp_tool_desc = "\n\n此外，你还接入了以下外部工具（MCP），请优先使用这些专用工具：\n"
+                    for tool in mcp_tools:
+                        func_name = tool['function']['name']
+                        desc = tool['function']['description']
+                        mcp_tool_desc += f"- **{func_name}**: {desc}\n"
+                    mcp_tool_desc += "\n**重要**：当 MCP 工具与通用工具（如 execute_code）功能重叠时，优先使用 MCP 工具。例如，抓取网页内容应使用 fetch__fetch 而非 execute_code。"
+                    parts.append(mcp_tool_desc)
+            except Exception as e:
+                logger.warning(f"Failed to add MCP tools to system prompt: {e}")
+        
         # 2. 添加工具状态提示（动态告知 LLM 当前可用的功能）
         knowledge_enabled = current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False)
         code_index_enabled = current_app.config.get("CODE_INDEX_ENABLED", False)
