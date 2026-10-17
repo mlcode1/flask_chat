@@ -236,7 +236,7 @@ def get_mcp_server_info(server_name):
 
 @skills_bp.route('/mcp/servers/add', methods=['POST'])
 @require_api_key
-async def add_mcp_server():
+def add_mcp_server():
     """添加并连接 MCP 服务器"""
     data = request.get_json() or {}
     
@@ -272,7 +272,10 @@ async def add_mcp_server():
             'env': env
         }
         
-        success = await manager.add_server(server_name, server_config)
+        async def _add():
+            return await manager.add_server(server_name, server_config)
+        
+        success = manager.run_sync(_add)
         
         if success:
             return jsonify({
@@ -294,7 +297,7 @@ async def add_mcp_server():
 
 @skills_bp.route('/mcp/servers/<server_name>/remove', methods=['POST'])
 @require_api_key
-async def remove_mcp_server(server_name):
+def remove_mcp_server(server_name):
     """移除 MCP 服务器"""
     manager = get_mcp_manager()
     
@@ -305,7 +308,7 @@ async def remove_mcp_server(server_name):
         }), 400
     
     try:
-        success = await manager.remove_server(server_name)
+        success = manager.remove_server_sync(server_name)
         
         if success:
             return jsonify({
@@ -327,7 +330,7 @@ async def remove_mcp_server(server_name):
 
 @skills_bp.route('/mcp/servers/<server_name>/reconnect', methods=['POST'])
 @require_api_key
-async def reconnect_mcp_server(server_name):
+def reconnect_mcp_server(server_name):
     """重新连接 MCP 服务器"""
     manager = get_mcp_manager()
     
@@ -338,12 +341,15 @@ async def reconnect_mcp_server(server_name):
         }), 400
     
     try:
-        # 先断开
-        if server_name in manager.connections:
-            await manager.connections[server_name].disconnect()
+        # 先断开再重连
+        async def _reconnect():
+            conn = manager.servers.get(server_name)
+            if conn:
+                await conn.disconnect()
+                return await conn.connect()
+            return False
         
-        # 再重新连接
-        success = await manager.connections[server_name].connect()
+        success = manager.run_sync(_reconnect)
         
         if success:
             return jsonify({

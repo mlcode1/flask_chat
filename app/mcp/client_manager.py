@@ -1,10 +1,15 @@
 """
 MCP Client Manager - 管理 MCP 服务器连接和工具调用
+
+架构：所有 MCP 异步操作都在一个持久后台事件循环线程上执行，
+避免与 Flask/eventlet 的同步上下文冲突。MCPClientManager 对外提供
+同步接口（run_sync），内部自动调度到后台线程。
 """
 import asyncio
 import json
 import logging
-from typing import Dict, List, Optional, Any
+import threading
+from typing import Dict, List, Optional, Any, Awaitable, Callable
 
 # 延迟导入 mcp 库，避免未安装时导致启动失败
 try:
@@ -22,23 +27,35 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _get_or_create_event_loop():
+    """获取当前线程的事件循环，没有则创建"""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
+
 class MCPServerConnection:
     """单个 MCP 服务器的连接管理"""
-    
+
     def __init__(self, name: str, server_config: Dict[str, Any]):
         """
-        初始化服务器连接
-        
         Args:
-            name: 服务器名称
-            server_config: 服务器配置
+            name: 服务器名称（也作为工具名前缀，如 filesystem__read_file）
+            server_config:
                 {
                     "transport": "stdio" | "sse",
-                    "command": "命令" (stdio),
-                    "args": [] (stdio),
-                    "env": {} (stdio),
-                    "url": "URL" (sse),
-                    "headers": {} (sse)
+                    "command": str (stdio),
+                    "args": list (stdio),
+                    "env": dict (stdio),
+                    "url": str (sse),
+                    "headers": dict (sse)
                 }
         """
         self.name = name
@@ -47,18 +64,16 @@ class MCPServerConnection:
         self.session: Optional[ClientSession] = None
         self.tools: List[Dict[str, Any]] = []
         self._connected = False
-    
+        # stdio 上下文管理器，disconnect 时用来 __aexit__
+        self._stdio_ctx = None
+        self._sse_ctx = None
+
     async def connect(self) -> bool:
-        """
-        连接到 MCP 服务器
-        
-        Returns:
-            bool: 是否连接成功
-        """
+        """连接服务器并拉取工具列表"""
         if not MCP_AVAILABLE:
-            logger.error("MCP library not installed, cannot connect to MCP server")
+            logger.error("MCP library not installed, cannot connect")
             return False
-            
+
         try:
             if self.transport == 'stdio':
                 await self._connect_stdio()
@@ -67,274 +82,270 @@ class MCPServerConnection:
             else:
                 logger.error(f"Unsupported transport: {self.transport}")
                 return False
-            
-            # 获取可用工具列表
+
             await self._list_tools()
-            
             self._connected = True
             logger.debug(f"Connected to MCP server: {self.name} ({len(self.tools)} tools)")
             return True
-            
         except Exception as e:
             logger.error(f"Failed to connect to MCP server {self.name}: {e}", exc_info=True)
             return False
-    
+
     async def _connect_stdio(self):
         """通过 stdio 连接到 MCP 服务器"""
         command = self.config.get('command')
         args = self.config.get('args', [])
-        env = self.config.get('env', {})
-        
+        env = self.config.get('env', {}) or None
+
         if not command:
             raise ValueError("stdio transport requires 'command' parameter")
-        
+
         server_params = StdioServerParameters(
             command=command,
             args=args,
             env=env
         )
-        
-        # 创建 stdio 客户端
-        client = await stdio_client(server_params).__aenter__()
-        self.session = ClientSession(client)
-        
-        # 初始化会话
+
+        # stdio_client 是 async context manager，进入后得到 (read, write) 元组
+        self._stdio_ctx = stdio_client(server_params)
+        streams = await self._stdio_ctx.__aenter__()
+        read_stream, write_stream = streams[0], streams[1]
+
+        self.session = ClientSession(read_stream, write_stream)
         await self.session.initialize()
-    
+
     async def _connect_sse(self):
         """通过 SSE 连接到 MCP 服务器"""
         url = self.config.get('url')
         headers = self.config.get('headers', {})
-        
+
         if not url:
             raise ValueError("sse transport requires 'url' parameter")
-        
-        # 创建 SSE 客户端
-        client = await sse_client(url, headers=headers).__aenter__()
-        self.session = ClientSession(client)
-        
-        # 初始化会话
+
+        self._sse_ctx = sse_client(url, headers=headers)
+        streams = await self._sse_ctx.__aenter__()
+        read_stream, write_stream = streams[0], streams[1]
+
+        self.session = ClientSession(read_stream, write_stream)
         await self.session.initialize()
-    
+
     async def _list_tools(self):
-        """获取服务器提供的工具列表"""
+        """拉取工具列表并转换为 OpenAI function calling 格式"""
         try:
             response = await self.session.list_tools()
-            
+            self.tools = []
             for tool in response.tools:
-                # 转换为 OpenAI Function Calling 格式
+                schema = tool.inputSchema if hasattr(tool, 'inputSchema') else {}
+                if schema is None:
+                    schema = {}
                 tool_def = {
                     "type": "function",
                     "function": {
-                        "name": f"{self.name}__{tool.name}",  # 添加服务器前缀
+                        "name": f"{self.name}__{tool.name}",
                         "description": tool.description or "",
                         "parameters": {
                             "type": "object",
-                            "properties": tool.inputSchema.get("properties", {}),
-                            "required": tool.inputSchema.get("required", [])
+                            "properties": schema.get("properties", {}),
+                            "required": schema.get("required", [])
                         }
                     }
                 }
                 self.tools.append(tool_def)
                 logger.debug(f"Discovered MCP tool: {tool_def['function']['name']}")
-                
         except Exception as e:
             logger.error(f"Failed to list tools from {self.name}: {e}", exc_info=True)
-    
+
     async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """
-        执行工具
-        
-        Args:
-            tool_name: 工具名称（不含服务器前缀）
-            arguments: 工具参数
-        
-        Returns:
-            str: 工具执行结果
-        """
+        """执行单个工具（tool_name 不含服务器前缀）"""
         if not self.session:
             return json.dumps({"error": f"MCP server {self.name} not connected"}, ensure_ascii=False)
-        
+
         try:
             logger.info(f"Executing MCP tool: {self.name}.{tool_name} with args: {arguments}")
-            
-            # 调用工具
             result = await self.session.call_tool(tool_name, arguments)
-            
-            # 提取文本内容
+
             if result.content:
                 text_parts = []
                 for content in result.content:
                     if hasattr(content, 'text'):
                         text_parts.append(content.text)
-                
                 response_text = "\n".join(text_parts) if text_parts else "No content"
                 logger.info(f"MCP tool {self.name}.{tool_name} executed successfully")
                 return response_text
             else:
                 return json.dumps({"result": "success"}, ensure_ascii=False)
-                
         except Exception as e:
             error_msg = f"MCP tool execution failed: {str(e)}"
             logger.error(error_msg, exc_info=True)
             return json.dumps({"error": error_msg}, ensure_ascii=False)
-    
+
     async def disconnect(self):
         """断开连接"""
-        if self.session:
-            try:
-                await self.session.__aexit__(None, None, None)
-            except Exception as e:
-                logger.warning(f"Error closing session for {self.name}: {e}")
-        
+        try:
+            if self._stdio_ctx:
+                await self._stdio_ctx.__aexit__(None, None, None)
+                self._stdio_ctx = None
+            if self._sse_ctx:
+                await self._sse_ctx.__aexit__(None, None, None)
+                self._sse_ctx = None
+        except Exception as e:
+            logger.warning(f"Error closing MCP transport for {self.name}: {e}")
+
         self.session = None
         self._connected = False
         logger.debug(f"Disconnected from MCP server: {self.name}")
-    
+
     @property
     def is_connected(self) -> bool:
-        """检查是否已连接"""
         return self._connected and self.session is not None
 
 
 class MCPClientManager:
-    """MCP 客户端管理器，管理多个 MCP 服务器"""
-    
+    """
+    MCP 客户端管理器，管理多个 MCP 服务器。
+
+    对外提供同步接口：
+      - connect_all_sync(configs)     # 启动时批量连接
+      - run_sync(coro_factory)        # 执行异步操作
+      - execute_tool_sync(name, args) # 同步调用工具
+      - disconnect_all_sync()         # 断开所有
+    """
+
     def __init__(self):
-        """初始化管理器"""
         self.servers: Dict[str, MCPServerConnection] = {}
-        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
-    
-    async def add_server(self, name: str, server_config: Dict[str, Any]) -> bool:
-        """
-        添加并连接 MCP 服务器
-        
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+
+    # ===== 后台事件循环线程 =====
+
+    def _ensure_loop(self):
+        """确保后台事件循环线程存在且运行中"""
+        if self._loop is not None and not self._loop.is_closed() and self._thread is not None and self._thread.is_alive():
+            return
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            args=(self._loop,),
+            daemon=True,
+            name="mcp-event-loop"
+        )
+        self._thread.start()
+        logger.debug("MCP background event loop thread started")
+
+    @staticmethod
+    def _run_loop(loop: asyncio.AbstractEventLoop):
+        """后台线程主函数"""
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    def run_sync(self, coro_factory: Callable[[], Awaitable]):
+        """在后台事件循环上执行一个异步协程，同步等待结果。
+
         Args:
-            name: 服务器名称
-            server_config: 服务器配置
-        
-        Returns:
-            bool: 是否添加成功
+            coro_factory: 返回协程的无参工厂函数（lambda / callable）
         """
+        self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
+        return future.result()  # 阻塞等待
+
+    # ===== 对外同步接口 =====
+
+    def connect_all_sync(self, server_configs: Dict[str, Dict[str, Any]]) -> Dict[str, bool]:
+        """启动时批量连接所有配置的 MCP 服务器"""
+        self._ensure_loop()
+
+        async def _connect_all():
+            results = {}
+            for name, config in server_configs.items():
+                success = await self._add_server_async(name, config)
+                results[name] = success
+            return results
+
+        return self.run_sync(_connect_all)
+
+    async def _add_server_async(self, name: str, server_config: Dict[str, Any]) -> bool:
         if name in self.servers:
             logger.warning(f"MCP server {name} already exists")
             return False
-        
+
         connection = MCPServerConnection(name, server_config)
-        
         if await connection.connect():
             self.servers[name] = connection
             return True
-        else:
-            return False
-    
-    async def remove_server(self, name: str) -> bool:
-        """
-        移除 MCP 服务器
-        
-        Args:
-            name: 服务器名称
-        
-        Returns:
-            bool: 是否移除成功
-        """
+        return False
+
+    def remove_server_sync(self, name: str) -> bool:
+        """同步移除指定服务器"""
         if name not in self.servers:
-            logger.warning(f"MCP server {name} not found")
             return False
-        
-        connection = self.servers[name]
-        await connection.disconnect()
-        del self.servers[name]
-        
-        logger.debug(f"Removed MCP server: {name}")
-        return True
-    
+
+        async def _remove():
+            conn = self.servers.pop(name, None)
+            if conn:
+                await conn.disconnect()
+            return True
+
+        return self.run_sync(_remove)
+
+    def execute_tool_sync(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """同步执行 MCP 工具调用。tool_name 格式：server_name__tool_name"""
+        if '__' not in tool_name:
+            return json.dumps({"error": f"Invalid MCP tool name format: {tool_name}"}, ensure_ascii=False)
+
+        server_name, actual_tool_name = tool_name.split('__', 1)
+
+        if server_name not in self.servers:
+            return json.dumps({"error": f"MCP server not found: {server_name}"}, ensure_ascii=False)
+
+        server = self.servers[server_name]
+        if not server.is_connected:
+            return json.dumps({"error": f"MCP server {server_name} not connected"}, ensure_ascii=False)
+
+        async def _exec():
+            return await server.execute_tool(actual_tool_name, arguments)
+
+        return self.run_sync(_exec)
+
+    def disconnect_all_sync(self):
+        """同步断开所有服务器"""
+        async def _disconnect():
+            for conn in list(self.servers.values()):
+                await conn.disconnect()
+            self.servers.clear()
+
+        self.run_sync(_disconnect)
+        # 关闭后台线程
+        if self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+        if self._loop and not self._loop.is_closed():
+            self._loop.close()
+        self._loop = None
+        self._thread = None
+
+    # ===== 查询接口（同步，不涉及异步） =====
+
     def get_all_tools(self) -> List[Dict[str, Any]]:
-        """
-        获取所有已连接服务器的工具
-        
-        Returns:
-            List[Dict]: 工具定义列表
-        """
         all_tools = []
-        
         for server in self.servers.values():
             if server.is_connected:
                 all_tools.extend(server.tools)
-        
         return all_tools
-    
-    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """
-        执行工具
-        
-        Args:
-            tool_name: 完整工具名称（server_name__tool_name）
-            arguments: 工具参数
-        
-        Returns:
-            str: 工具执行结果
-        """
-        # 解析服务器名称和工具名称
-        if '__' not in tool_name:
-            return json.dumps({"error": f"Invalid MCP tool name format: {tool_name}"}, ensure_ascii=False)
-        
-        server_name, actual_tool_name = tool_name.split('__', 1)
-        
-        # 查找服务器
-        if server_name not in self.servers:
-            return json.dumps({"error": f"MCP server not found: {server_name}"}, ensure_ascii=False)
-        
-        server = self.servers[server_name]
-        
-        if not server.is_connected:
-            return json.dumps({"error": f"MCP server {server_name} not connected"}, ensure_ascii=False)
-        
-        # 执行工具
-        return await server.execute_tool(actual_tool_name, arguments)
-    
-    async def connect_all(self, server_configs: Dict[str, Dict[str, Any]]) -> Dict[str, bool]:
-        """
-        批量连接多个服务器
-        
-        Args:
-            server_configs: 服务器配置字典 {name: config}
-        
-        Returns:
-            Dict[str, bool]: 每个服务器的连接结果
-        """
-        results = {}
-        
-        for name, config in server_configs.items():
-            success = await self.add_server(name, config)
-            results[name] = success
-        
-        return results
-    
-    async def disconnect_all(self):
-        """断开所有服务器连接"""
-        for name in list(self.servers.keys()):
-            await self.remove_server(name)
-        
-        logger.debug("All MCP servers disconnected")
-    
+
+    def list_servers(self) -> List[Dict[str, Any]]:
+        """列出所有已配置的 MCP 服务器信息"""
+        return [
+            self.get_server_info(name)
+            for name in self.servers
+        ]
+
     def get_connected_servers(self) -> List[str]:
-        """获取已连接的服务器列表"""
         return [name for name, server in self.servers.items() if server.is_connected]
-    
+
     def get_server_info(self, name: str) -> Optional[Dict[str, Any]]:
-        """
-        获取服务器信息
-        
-        Args:
-            name: 服务器名称
-        
-        Returns:
-            Optional[Dict]: 服务器信息
-        """
         if name not in self.servers:
             return None
-        
         server = self.servers[name]
         return {
             "name": name,
@@ -343,3 +354,37 @@ class MCPClientManager:
             "tools_count": len(server.tools),
             "tools": [t['function']['name'] for t in server.tools]
         }
+
+    # ===== 向后兼容的异步接口（HTTP 路由用）=====
+
+    async def add_server(self, name: str, server_config: Dict[str, Any]) -> bool:
+        return await self._add_server_async(name, server_config)
+
+    async def remove_server(self, name: str) -> bool:
+        if name not in self.servers:
+            return False
+        connection = self.servers.pop(name, None)
+        if connection:
+            await connection.disconnect()
+        return True
+
+    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        if '__' not in tool_name:
+            return json.dumps({"error": f"Invalid MCP tool name format: {tool_name}"}, ensure_ascii=False)
+        server_name, actual_tool_name = tool_name.split('__', 1)
+        if server_name not in self.servers:
+            return json.dumps({"error": f"MCP server not found: {server_name}"}, ensure_ascii=False)
+        server = self.servers[server_name]
+        if not server.is_connected:
+            return json.dumps({"error": f"MCP server {server_name} not connected"}, ensure_ascii=False)
+        return await server.execute_tool(actual_tool_name, arguments)
+
+    async def connect_all(self, server_configs: Dict[str, Dict[str, Any]]) -> Dict[str, bool]:
+        results = {}
+        for name, config in server_configs.items():
+            results[name] = await self._add_server_async(name, config)
+        return results
+
+    async def disconnect_all(self):
+        for name in list(self.servers.keys()):
+            await self.remove_server(name)

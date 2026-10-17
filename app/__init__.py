@@ -129,22 +129,21 @@ def create_app():
                 print(f"⚠️ Skill 系统初始化失败: {e}")
                 logger.error(f"Failed to initialize skill system: {e}", exc_info=True)
 
-        # 初始化 MCP 客户端
+        # 初始化 MCP 客户端（使用持久后台事件循环线程，不创建一次性循环）
         if app.config.get('MCP_ENABLED', False):
             try:
                 mcp_servers_config = app.config.get('MCP_SERVERS_CONFIG', {})
                 if mcp_servers_config:
                     mcp_manager = get_mcp_manager()
-                    # 在应用上下文中连接 MCP 服务器
-                    import asyncio
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(mcp_manager.connect_all(mcp_servers_config))
-                        connected = mcp_manager.get_connected_servers()
-                        print(f"✅ MCP 系统已初始化，连接了 {len(connected)} 个服务器")
-                    finally:
-                        loop.close()
+                    results = mcp_manager.connect_all_sync(mcp_servers_config)
+                    connected = mcp_manager.get_connected_servers()
+                    failed = [n for n, ok in results.items() if not ok]
+                    if failed:
+                        print(f"⚠️ MCP 部分服务器连接失败: {failed}")
+                    if connected:
+                        print(f"✅ MCP 系统已初始化，连接了 {len(connected)} 个服务器: {connected}")
+                    else:
+                        print("⚠️ MCP 已启用但所有服务器均连接失败")
                 else:
                     print("ℹ️ MCP 已启用但未配置服务器")
             except Exception as e:

@@ -383,45 +383,31 @@ def execute_tool(name, arguments, user_id=None):
         pass
 
     try:
-        # 检查是否是 Skill 工具（格式：skill_name__tool_name）
-        if '__' in name and not name.startswith('mcp_'):
-            skill_name, tool_name = name.split('__', 1)
-            logger.info(f"Executing skill tool: {skill_name}.{tool_name}")
+        # 检查是否是带前缀的工具（格式：prefix__tool_name）
+        # 前缀可能是 MCP 服务器名或 Skill 名
+        if '__' in name:
+            prefix, tool_name = name.split('__', 1)
             
+            # 优先检查是否是 MCP 工具（前缀匹配已连接的 MCP 服务器）
+            mcp_manager = _get_mcp_manager()
+            if mcp_manager and prefix in mcp_manager.servers:
+                logger.info(f"Executing MCP tool: {name}")
+                try:
+                    result = mcp_manager.execute_tool_sync(name, args)
+                    return result
+                except Exception as e:
+                    logger.error(f"MCP tool execution failed: {e}", exc_info=True)
+                    return json.dumps({"error": f"MCP 工具执行失败: {str(e)}"}, ensure_ascii=False)
+            
+            # 否则尝试 Skill 工具
+            logger.info(f"Executing skill tool: {prefix}.{tool_name}")
             try:
                 skill_loader = _get_skill_loader()
-                result = skill_loader.execute_tool(tool_name, args, skill_name)
+                result = skill_loader.execute_tool(tool_name, args, prefix)
                 return result
             except Exception as e:
                 logger.error(f"Skill tool execution failed: {e}", exc_info=True)
                 return json.dumps({"error": f"技能工具执行失败: {str(e)}"}, ensure_ascii=False)
-        
-        # 检查是否是 MCP 工具（格式：mcp_server_name__tool_name）
-        elif name.startswith('mcp_'):
-            mcp_manager = _get_mcp_manager()
-            if not mcp_manager:
-                return json.dumps({"error": "MCP 系统未启用"}, ensure_ascii=False)
-            
-            logger.info(f"Executing MCP tool: {name}")
-            try:
-                # MCP 工具调用是异步的，需要获取事件循环
-                import asyncio
-                
-                # 尝试获取当前事件循环，如果不存在则创建新的
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_closed():
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                
-                result = loop.run_until_complete(mcp_manager.execute_tool(name, args))
-                return result
-            except Exception as e:
-                logger.error(f"MCP tool execution failed: {e}", exc_info=True)
-                return json.dumps({"error": f"MCP 工具执行失败: {str(e)}"}, ensure_ascii=False)
         
         # 否则执行内置工具
         else:
