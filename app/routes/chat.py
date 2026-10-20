@@ -754,3 +754,71 @@ def submit_feedback(msg_id):
         "message_id": msg_id,
         "feedback": feedback
     })
+
+
+# ============================================================
+# 消息编辑与删除
+# ============================================================
+
+@chat_bp.route("/api/messages/<int:msg_id>", methods=["PUT"])
+@require_api_key
+def edit_message(msg_id):
+    """编辑用户消息：更新内容并删除该消息之后的所有消息（含AI回复），返回新对话上下文"""
+    msg = Message.query.get_or_404(msg_id)
+
+    if msg.role != "user":
+        raise BadRequestError("只能编辑用户消息")
+
+    data = request.get_json() or {}
+    new_content = (data.get("content") or "").strip()
+    if not new_content:
+        raise BadRequestError("消息内容不能为空")
+
+    cid = msg.conversation_id
+
+    # 删除该消息及之后的所有消息（含 AI 回复）
+    Message.query.filter(
+        Message.conversation_id == cid,
+        Message.id >= msg_id
+    ).delete(synchronize_session=False)
+
+    # 创建新的用户消息
+    new_msg = Message(
+        conversation_id=cid,
+        role="user",
+        content=new_content,
+        status="completed"
+    )
+    db.session.add(new_msg)
+    db.session.commit()
+
+    log_audit("edit_message", cid, f"Edited message {msg_id}")
+
+    return jsonify({
+        "status": "success",
+        "old_message_id": msg_id,
+        "new_message_id": new_msg.id,
+        "content": new_content
+    })
+
+
+@chat_bp.route("/api/messages/<int:msg_id>", methods=["DELETE"])
+@require_api_key
+def delete_message(msg_id):
+    """删除单条消息及其之后的所有消息（含对应的AI回复）"""
+    msg = Message.query.get_or_404(msg_id)
+    cid = msg.conversation_id
+
+    # 删除该消息及之后的所有消息
+    deleted_count = Message.query.filter(
+        Message.conversation_id == cid,
+        Message.id >= msg_id
+    ).delete(synchronize_session=False)
+
+    db.session.commit()
+    log_audit("delete_message", cid, f"Deleted {deleted_count} messages from {msg_id}")
+
+    return jsonify({
+        "status": "success",
+        "deleted_count": deleted_count
+    })

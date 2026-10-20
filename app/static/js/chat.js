@@ -33,6 +33,7 @@
     let isStreaming = false;
     let verifyEnabled = false;
     let agentModeEnabled = false;
+    let messageQueue = [];  // 消息排队队列：AI正在回复时，新消息排队等待发送
     
     // ========== Socket.IO 连接 ==========
     let socket = null;
@@ -282,6 +283,10 @@
             currentRow = null;
             fullContent = "";
             toolCalls = [];
+            // 如果队列里有消息，自动发送下一条
+            if (messageQueue.length > 0) {
+                setTimeout(() => processQueue(), 300);
+            }
         }
         
         // 生成完成
@@ -583,11 +588,181 @@
             renderToolCalls(bubble, toolCalls);
         }
 
+        // 为用户消息添加编辑和删除按钮
+        if (role === "user" && messageId) {
+            const actionDiv = document.createElement("div");
+            actionDiv.className = "message-actions";
+            actionDiv.innerHTML = `
+                <button class="msg-edit-btn" data-message-id="${messageId}" title="编辑">✏️</button>
+                <button class="msg-delete-btn" data-message-id="${messageId}" title="删除">🗑️</button>
+            `;
+            bubble.appendChild(actionDiv);
+
+            actionDiv.querySelector('.msg-edit-btn').addEventListener('click', function() {
+                startEditMessage(messageId, bubble, content);
+            });
+            actionDiv.querySelector('.msg-delete-btn').addEventListener('click', function() {
+                deleteMessage(messageId, row);
+            });
+        }
+
         row.appendChild(avatar);
         row.appendChild(bubble);
-        messagesContainer.appendChild(row);
+        // 插入到排队容器之前（排队容器始终在最底部）
+        const queueContainer = document.getElementById('queue-container');
+        if (queueContainer) {
+            messagesContainer.insertBefore(row, queueContainer);
+        } else {
+            messagesContainer.appendChild(row);
+        }
         scrollToBottom();
         return bubble;
+    }
+
+    // 编辑消息
+    function startEditMessage(messageId, bubble, originalContent) {
+        // 移除 HTML 标签获取纯文本
+        const tmp = document.createElement('div');
+        tmp.innerHTML = originalContent;
+        const plainText = tmp.textContent || tmp.innerText || '';
+
+        // 创建编辑区域
+        const editArea = document.createElement('div');
+        editArea.className = 'message-edit-area';
+        editArea.innerHTML = `
+            <textarea class="message-edit-input">${escapeHtml(plainText)}</textarea>
+            <div class="message-edit-actions">
+                <button class="msg-edit-save-btn">保存并重新生成</button>
+                <button class="msg-edit-cancel-btn">取消</button>
+            </div>
+        `;
+
+        // 替换 bubble 内容
+        const oldContent = bubble.innerHTML;
+        bubble.innerHTML = '';
+        bubble.appendChild(editArea);
+
+        const textarea = editArea.querySelector('.message-edit-input');
+        textarea.focus();
+        textarea.style.height = 'auto';
+        textarea.style.height = textarea.scrollHeight + 'px';
+
+        // 取消编辑
+        editArea.querySelector('.msg-edit-cancel-btn').addEventListener('click', function() {
+            bubble.innerHTML = oldContent;
+            // 重新绑定编辑/删除按钮
+            const actions = bubble.querySelector('.message-actions');
+            if (actions) {
+                actions.querySelector('.msg-edit-btn').addEventListener('click', function() {
+                    startEditMessage(messageId, bubble, originalContent);
+                });
+                actions.querySelector('.msg-delete-btn').addEventListener('click', function() {
+                    deleteMessage(messageId, bubble.closest('.message-row'));
+                });
+            }
+        });
+
+        // 保存编辑
+        editArea.querySelector('.msg-edit-save-btn').addEventListener('click', async function() {
+            const newContent = textarea.value.trim();
+            if (!newContent) return;
+
+            try {
+                const res = await authFetch(`/api/messages/${messageId}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ content: newContent })
+                });
+
+                if (!res.ok) throw new Error('编辑失败');
+                const data = await res.json();
+
+                // 删除该消息之后的所有 DOM 消息
+                const row = bubble.closest('.message-row');
+                let next = row.nextElementSibling;
+                while (next) {
+                    const toRemove = next;
+                    next = next.nextElementSibling;
+                    toRemove.remove();
+                }
+
+                // 用新内容重新渲染用户消息
+                bubble.innerHTML = formatContent(newContent);
+                
+                // 添加编辑/删除按钮
+                const actionDiv = document.createElement("div");
+                actionDiv.className = "message-actions";
+                actionDiv.innerHTML = `
+                    <button class="msg-edit-btn" data-message-id="${data.new_message_id}" title="编辑">✏️</button>
+                    <button class="msg-delete-btn" data-message-id="${data.new_message_id}" title="删除">🗑️</button>
+                `;
+                bubble.appendChild(actionDiv);
+                actionDiv.querySelector('.msg-edit-btn').addEventListener('click', function() {
+                    startEditMessage(data.new_message_id, bubble, newContent);
+                });
+                actionDiv.querySelector('.msg-delete-btn').addEventListener('click', function() {
+                    deleteMessage(data.new_message_id, bubble.closest('.message-row'));
+                });
+
+                row.setAttribute('data-message-id', data.new_message_id);
+
+                // 重新生成 AI 回复
+                isStreaming = true;
+                sendBtn.disabled = true;
+                interruptBtn.style.display = "inline-block";
+
+                const { bubble: newBubble, row: newRow } = createStreamingBubbleWithRow();
+                currentBubble = newBubble;
+                currentRow = newRow;
+                fullContent = "";
+                toolCalls = [];
+
+                socket.once('message_created', (d) => {
+                    currentMessageId = d.message_id;
+                    if (currentRow) {
+                        currentRow.removeAttribute('data-streaming');
+                        currentRow.setAttribute('data-message-id', currentMessageId);
+                    }
+                });
+
+                socket.emit('chat_message', {
+                    conversation_id: currentConvId,
+                    content: newContent,
+                    model: modelSelector.value,
+                    image_urls: []
+                });
+
+            } catch (err) {
+                console.error('编辑消息失败:', err);
+                bubble.innerHTML = oldContent;
+            }
+        });
+    }
+
+    // 删除消息
+    async function deleteMessage(messageId, row) {
+        if (!confirm('确定删除此消息及之后的所有消息吗？')) return;
+
+        try {
+            const res = await authFetch(`/api/messages/${messageId}`, {
+                method: "DELETE"
+            });
+
+            if (!res.ok) throw new Error('删除失败');
+
+            // 删除该消息及之后的所有 DOM
+            let next = row.nextElementSibling;
+            while (next) {
+                const toRemove = next;
+                next = next.nextElementSibling;
+                toRemove.remove();
+            }
+            row.remove();
+
+        } catch (err) {
+            console.error('删除消息失败:', err);
+            alert('删除失败，请重试');
+        }
     }
 
     // 提交反馈
@@ -914,7 +1089,13 @@
 
         row.appendChild(avatar);
         row.appendChild(bubble);
-        messagesContainer.appendChild(row);
+        // 插入到排队容器之前（排队容器始终在最底部）
+        const queueContainer = document.getElementById('queue-container');
+        if (queueContainer) {
+            messagesContainer.insertBefore(row, queueContainer);
+        } else {
+            messagesContainer.appendChild(row);
+        }
         scrollToBottom();
         return { bubble, row };
     }
@@ -1250,7 +1431,7 @@
 
     async function sendMessage() {
         let content = messageInput.value.trim();
-        if ((!content && pendingFiles.length === 0) || isStreaming) return;
+        if (!content && pendingFiles.length === 0) return;
 
         // 如果有文件，先上传
         if (pendingFiles.length > 0) {
@@ -1262,9 +1443,23 @@
             renderFilePreview();
         }
 
+        // 清空输入框
+        messageInput.value = "";
+        messageInput.style.height = "auto";
+
+        // AI 正在回复时，消息排队（不渲染到聊天区，只在队列卡片里显示）
+        if (isStreaming) {
+            messageQueue.push({ content, isAgent: agentModeEnabled });
+            renderQueueMessages();
+            return;
+        }
+
+        await executeSend(content);
+    }
+
+    async function executeSend(content, skipAddMessage = false) {
         // Agent 模式：调用 Agent API
         if (agentModeEnabled) {
-            // 创建对话（如果还没有）
             if (!currentConvId) {
                 const res = await authFetch("/api/conversations", {
                     method: "POST",
@@ -1276,11 +1471,8 @@
                 addConvToSidebar(conv.id, conv.title);
             }
             
-            addMessage("user", content);
-            messageInput.value = "";
-            messageInput.style.height = "auto";
+            if (!skipAddMessage) addMessage("user", content);
             
-            // 调用 Agent API（在 isChatPage 块内定义，需要延迟调用）
             if (window.sendAgentMessage) {
                 window.sendAgentMessage(content);
             } else {
@@ -1301,9 +1493,7 @@
             addConvToSidebar(conv.id, conv.title);
         }
 
-        addMessage("user", content);
-        messageInput.value = "";
-        messageInput.style.height = "auto";
+        if (!skipAddMessage) addMessage("user", content);
         isStreaming = true;
         sendBtn.disabled = true;
         interruptBtn.style.display = "inline-block";
@@ -1314,18 +1504,14 @@
         fullContent = "";
         toolCalls = [];
 
-        // 先注册 message_created 监听器，再 emit chat_message
         socket.once('message_created', (data) => {
             currentMessageId = data.message_id;
-            console.log('[WS] Message created:', currentMessageId);
-            // 标记 streaming 完成，设置 data-message-id
             if (currentRow) {
                 currentRow.removeAttribute('data-streaming');
                 currentRow.setAttribute('data-message-id', currentMessageId);
             }
         });
 
-        // 通过 WebSocket 发送消息
         socket.emit('chat_message', {
             conversation_id: currentConvId,
             content: content,
@@ -1333,10 +1519,8 @@
             image_urls: []
         });
         
-        // 备用方案：如果 3 秒内没收到 message_created，轮询获取最新的 assistant 消息 ID
         setTimeout(() => {
             if (!currentMessageId && currentBubble) {
-                console.log('[WS] message_created 超时，轮询获取消息 ID');
                 authFetch(`/api/conversations/${currentConvId}/messages`)
                     .then(res => res.json())
                     .then(data => {
@@ -1344,7 +1528,6 @@
                         const lastAssistant = msgs.filter(m => m.role === 'assistant').pop();
                         if (lastAssistant) {
                             currentMessageId = lastAssistant.id;
-                            console.log('[WS] 轮询获取到 message_id:', currentMessageId);
                             if (currentRow) {
                                 currentRow.removeAttribute('data-streaming');
                                 currentRow.setAttribute('data-message-id', currentMessageId);
@@ -1354,6 +1537,73 @@
                     .catch(err => console.error('[WS] 轮询失败:', err));
             }
         }, 3000);
+    }
+
+    function renderQueueMessages() {
+        // 移除旧的排队容器
+        const oldContainer = document.getElementById('queue-container');
+        if (oldContainer) oldContainer.remove();
+
+        if (messageQueue.length === 0) return;
+
+        const container = document.createElement('div');
+        container.id = 'queue-container';
+        container.className = 'queue-container';
+
+        messageQueue.forEach((item, index) => {
+            const card = document.createElement('div');
+            card.className = 'queue-item';
+            card.dataset.index = index;
+            card.innerHTML = `
+                <div class="queue-item-content">${escapeHtml(item.content)}</div>
+                <div class="queue-item-actions">
+                    <button class="queue-edit-btn" data-index="${index}" title="编辑（恢复到输入框）">✏️</button>
+                    <button class="queue-cancel-btn" data-index="${index}" title="取消发送">✕</button>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+
+        // 排队容器始终追加到最底部
+        messagesContainer.appendChild(container);
+        scrollToBottom();
+
+        // 绑定编辑按钮：把消息内容恢复到输入框，从队列移除
+        container.querySelectorAll('.queue-edit-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const idx = parseInt(this.dataset.index);
+                const item = messageQueue[idx];
+                if (!item) return;
+                // 恢复到输入框
+                messageInput.value = item.content;
+                messageInput.focus();
+                messageInput.style.height = 'auto';
+                messageInput.style.height = messageInput.scrollHeight + 'px';
+                // 从队列移除
+                messageQueue.splice(idx, 1);
+                renderQueueMessages();
+            });
+        });
+
+        // 绑定取消按钮：直接从队列移除
+        container.querySelectorAll('.queue-cancel-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const idx = parseInt(this.dataset.index);
+                messageQueue.splice(idx, 1);
+                renderQueueMessages();
+            });
+        });
+    }
+
+    function processQueue() {
+        if (messageQueue.length === 0) {
+            renderQueueMessages();
+            return;
+        }
+        const next = messageQueue.shift();
+        renderQueueMessages();
+        // 队列执行时正常 addMessage，把用户消息渲染到聊天区
+        executeSend(next.content, false);
     }
 
     function createCursor() {

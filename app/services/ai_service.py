@@ -169,6 +169,13 @@ class AIService:
                 tool_name = tc["function"]["name"]
                 tool_args = tc["function"]["arguments"]
                 
+                # 中断检查：用户点了中断就不再执行后续工具
+                if stop_event and stop_event.is_set():
+                    if on_usage:
+                        on_usage(total_input_tokens, total_output_tokens, total_cached_tokens)
+                    yield "[已打断]"
+                    return
+                
                 # 检查是否为危险工具
                 if is_dangerous_tool(tool_name) and on_confirm_request and conversation_id:
                     # 发送确认请求给前端
@@ -191,6 +198,14 @@ class AIService:
                     
                     # 等待用户确认（最多60秒）
                     confirmed = confirm_event.wait(timeout=60)
+                    
+                    # 中断检查：等待确认期间用户可能点了中断
+                    if stop_event and stop_event.is_set():
+                        _pending_tool_confirmations.pop(confirm_id, None)
+                        if on_usage:
+                            on_usage(total_input_tokens, total_output_tokens, total_cached_tokens)
+                        yield "[已打断]"
+                        return
                     
                     # 清理待确认记录
                     confirm_data = _pending_tool_confirmations.pop(confirm_id, None)

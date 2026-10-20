@@ -18,7 +18,10 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用�
 - **多模型切换** — 支持配置多个大语言模型，用户可在对话中自由切换；兼容 OpenAI API 协议的任意服务（包括 Ollama 本地模型）
 - **WebSocket 流式输出** — 基于 Flask-SocketIO + eventlet 实现实时双向通信，逐字流式响应
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
-- **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、知识库检索、代码库检索等工具
+- **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、知识库检索、代码库检索等工具；支持 Skill 插件系统（本地 Python 插件，热加载，命名空间隔离）和 MCP 协议集成（通过 stdio/SSE 连接外部工具服务器，自动发现工具并注册）
+- **消息排队** — AI 回复过程中用户可继续输入消息，消息排队等待，队列中的消息可编辑（恢复到输入框）和取消；AI 回复完成后自动发送队列中的下一条消息
+- **消息编辑与删除** — 支持 hover 编辑用户消息（编辑后重新生成 AI 回复）和删除消息（删除该消息及之后的所有消息）
+- **工具调用中断** — 工具执行过程中检测中断信号，执行完当前工具后跳过后续工具调用，避免长时间阻塞
 - **工具开关控制** — 知识库查询和代码库查询工具可通过页面顶部开关实时启用/禁用，无需重启服务
 - **RAG 知识检索** — 上传文档后，AI 可通过工具调用自动检索知识库回答问题；支持 BM25 + 向量混合检索（BM25 索引缓存，避免重复构建）、多查询重写、结果重排序
 - **代码库索引管理** — 通过 Web UI 管理代码仓库配置（名称 + 本地路径），支持全量构建与增量构建（混合方案：文件修改时间 + SHA256 哈希双重过滤），构建过程 WebSocket 实时进度推送，支持取消任务；AI 在对话中通过 `search_code` 工具自动检索相关代码片段
@@ -93,12 +96,12 @@ flask_chat/
     │   ├── webhook.py                 # Webhook 管理 API
     │   └── speech.py                  # 语音 I/O API
     ├── services/
-    │   ├── ai_service.py             # AI 服务（流式输出 + 工具调用循环 + 模型降级）
+    │   ├── ai_service.py             # AI 服务（流式输出 + 工具调用循环 + 模型降级 + 中断检查）
     │   ├── auth_service.py           # JWT 认证服务（Token 生成/验证/登录/注册）
-    │   ├── context_service.py        # 上下文管理（窗口裁剪 + 压缩 + 长期记忆 + system_prompt）
+    │   ├── context_service.py        # 上下文管理（窗口裁剪 + 压缩 + 长期记忆 + system_prompt + MCP 工具动态注入）
     │   ├── rag_service.py            # RAG 服务（解析/分块/嵌入/存储/混合检索/BM25缓存）
     │   ├── verifier_service.py       # 结果验证服务（独立 Agent 验证）
-    │   ├── tool_service.py           # 工具定义与执行（用户权限传递）
+    │   ├── tool_service.py           # 工具定义与执行（内置工具 + Skill + MCP 统一分发，用户权限传递）
     │   ├── cache_service.py          # 响应缓存（内存/Redis 双模式）
     │   ├── retry_service.py          # 重试与降级（指数退避 + fallback）
     │   ├── security_service.py       # 安全（API Key 认证 / 注入过滤 / 审计日志）
@@ -108,6 +111,16 @@ flask_chat/
     │   ├── agent_service.py          # Agent 工作流（多步骤推理 + 工具链调用）
     │   ├── webhook_service.py        # Webhook 服务（出站回调 + 入站触发）
     │   └── speech_service.py         # 语音服务（STT/TTS，OpenAI Whisper + Edge TTS）
+    ├── skills/                        # Skill 插件目录（热加载）
+    │   ├── calculate/                 # 数学计算技能（表达式计算/单位转换/数学函数）
+    │   │   ├── __init__.py            # Skill 实现（继承 BaseSkill）
+    │   │   └── skill.json             # Skill 元数据
+    │   └── weather/                   # 天气查询技能（示例）
+    │       ├── __init__.py
+    │       └── skill.json
+    ├── mcp/                           # MCP 客户端模块
+    │   ├── __init__.py                # 导出 MCPClientManager, MCPServerConnection
+    │   └── client_manager.py          # MCP 客户端管理器（持久后台事件循环 + stdio/SSE + 自动工具发现）
     ├── static/
     │   ├── css/style.css
     │   └── js/
@@ -253,6 +266,12 @@ cp .env.example .env
 | `CODE_INDEX_MAX_CHARS` | 代码分块最大字符数 | `1500` |
 | `CODE_INDEX_SUPPORTED_EXTS` | 支持索引的文件扩展名 | `.py,.js,.ts,.tsx,...` |
 | `CODE_INDEX_EXCLUDE_PATTERNS` | 排除的目录/文件名模式 | `.git,__pycache__,...` |
+| **Skill 配置** | | |
+| `SKILLS_ENABLED` | 是否启用 Skill 插件系统 | `true` |
+| `SKILLS_DIR` | Skill 插件目录 | `skills` |
+| **MCP 配置** | | |
+| `MCP_ENABLED` | 是否启用 MCP 协议集成 | `false` |
+| `MCP_SERVERS_CONFIG` | MCP 服务器配置（JSON 字符串，如 `{"fetch":{"transport":"stdio","command":"uvx","args":["mcp-server-fetch"],"env":{"HTTP_PROXY":"...","HTTPS_PROXY":"..."}}}`） | 空 |
 
 **5. 数据库初始化**
 
@@ -561,6 +580,30 @@ pytest tests/ -v -s
 | `POST` | `/api/upload/image` | 上传图片（多模态） |
 | `POST` | `/api/messages/<msg_id>/feedback` | 提交消息反馈 |
 
+#### 消息编辑与删除
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `PUT` | `/api/messages/<msg_id>` | 编辑用户消息（删除该消息及之后的所有消息，创建新用户消息） |
+| `DELETE` | `/api/messages/<msg_id>` | 删除消息及之后的所有消息 |
+
+#### Skill & MCP 管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/skills/list` | 列出所有已加载的 Skills |
+| `GET` | `/api/skills/<name>/info` | 获取指定 Skill 的详细信息 |
+| `POST` | `/api/skills/reload` | 重新加载所有 Skills |
+| `POST` | `/api/skills/<name>/reload` | 重新加载指定 Skill |
+| `POST` | `/api/skills/<name>/enable` | 启用指定 Skill |
+| `POST` | `/api/skills/<name>/disable` | 禁用指定 Skill |
+| `POST` | `/api/skills/<name>/test` | 测试 Skill 中的工具 |
+| `GET` | `/api/skills/mcp/servers` | 列出所有 MCP 服务器 |
+| `GET` | `/api/skills/mcp/servers/<name>/info` | 获取 MCP 服务器信息 |
+| `POST` | `/api/skills/mcp/servers/add` | 添加并连接 MCP 服务器 |
+| `POST` | `/api/skills/mcp/servers/<name>/remove` | 移除 MCP 服务器 |
+| `POST` | `/api/skills/mcp/servers/<name>/reconnect` | 重新连接 MCP 服务器 |
+
 #### 系统与运维
 
 | 方法 | 路径 | 说明 |
@@ -584,6 +627,7 @@ pytest tests/ -v -s
 | `generation_completed` | ← 客户端 | AI 回复完成 |
 | `generation_error` | ← 客户端 | 生成失败 |
 | `stop_generation` | → 服务端 | 打断生成 |
+| `content_reset` | ← 客户端 | 工具调用完成、开启下一轮答案前清空引导性正文 |
 | `join` | → 服务端 | 加入对话房间 |
 | `leave` | → 服务端 | 离开对话房间 |
 | `index_progress` | ← 客户端 | 接收代码索引构建进度 |
