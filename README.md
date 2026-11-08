@@ -19,7 +19,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用�
 - **WebSocket 流式输出** — 基于 Flask-SocketIO + eventlet 实现实时双向通信，逐字流式响应
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
 - **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、知识库检索、代码库检索等工具；支持 Skill 插件系统（本地 Python 插件，热加载，命名空间隔离）和 MCP 协议集成（通过 stdio/SSE 连接外部工具服务器，自动发现工具并注册）
-- **工具可靠性保障** — 单次执行 30 秒超时控制（`ThreadPoolExecutor`），连续失败 5 次自动熔断 60 秒，防止异常工具拖垮系统
+- **工具可靠性保障** — 单次执行 30 秒超时控制（`ThreadPoolExecutor`），连续失败 5 次自动熔断 60 秒，工具调用轮次上限 10 轮（达上限后撤掉工具强制模型总结作答），防止异常工具拖垮系统或陷入死循环
 - **MCP 服务器管理 UI** — 侧边栏可视化查看连接状态与工具列表，支持运行时添加、重连、移除，无需改配置文件
 - **消息排队** — AI 回复过程中用户可继续输入消息，消息排队等待，队列中的消息可编辑（恢复到输入框）和取消；AI 回复完成后自动发送队列中的下一条消息
 - **消息编辑与删除** — 支持 hover 编辑用户消息（编辑后重新生成 AI 回复）和删除消息（删除该消息及之后的所有消息）
@@ -667,7 +667,7 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **WebSocket Streaming** — Real-time bidirectional communication via Flask-SocketIO + eventlet, token-by-token streaming
 - **Generation Interruption** — Cooperative cancellation via flag checks at three points (per round / per token / per tool call); background tasks survive client disconnect, with resume-on-reconnect
 - **Tool Calling** — Three-tier unified dispatch: built-in tools, Skill plugins (hot-reloadable Python modules with namespace isolation), and MCP protocol (stdio/SSE external servers with automatic tool discovery)
-- **Tool Reliability** — 30s per-execution timeout (`ThreadPoolExecutor`), circuit breaker after 5 consecutive failures (60s cooldown)
+- **Tool Reliability** — 30s per-execution timeout (`ThreadPoolExecutor`), circuit breaker after 5 consecutive failures (60s cooldown), and a 10-round cap on tool-call loops (tools are withdrawn at the cap so the model must summarize with what it has)
 - **MCP Server Management UI** — Inspect connection status and tool lists in the sidebar; add / reconnect / remove servers at runtime without editing config files
 - **Message Queueing** — Keep sending messages while the AI is replying; queued messages appear as cards above the input box with edit (recall into input) and cancel actions, and are dispatched automatically in order
 - **Message Edit & Delete** — Hover a user message to edit (regenerates the AI reply) or delete (removes that message and everything after it)
