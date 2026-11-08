@@ -512,7 +512,7 @@
         });
     }
 
-    function addMessage(role, content, interrupted, verification, messageId, toolCalls) {
+    function addMessage(role, content, interrupted, verification, messageId, toolCalls, imageUrls) {
         const welcome = messagesContainer.querySelector(".welcome-message");
         if (welcome) welcome.remove();
 
@@ -545,6 +545,31 @@
         const bubble = document.createElement("div");
         bubble.className = "message-bubble";
         bubble.innerHTML = formatContent(content);
+
+        // 渲染图片（多模态）
+        if (imageUrls && imageUrls.length > 0) {
+            const imgContainer = document.createElement("div");
+            imgContainer.className = "message-images";
+            imgContainer.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;";
+            imageUrls.forEach(url => {
+                const img = document.createElement("img");
+                img.src = url;
+                img.style.cssText = "max-width:200px;max-height:200px;border-radius:8px;cursor:pointer;";
+                img.title = "点击查看大图";
+                img.addEventListener('click', () => {
+                    const overlay = document.createElement('div');
+                    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;z-index:9999;cursor:zoom-out;";
+                    const bigImg = document.createElement('img');
+                    bigImg.src = url;
+                    bigImg.style.cssText = "max-width:90%;max-height:90%;border-radius:8px;";
+                    overlay.appendChild(bigImg);
+                    overlay.addEventListener('click', () => overlay.remove());
+                    document.body.appendChild(overlay);
+                });
+                imgContainer.appendChild(img);
+            });
+            bubble.appendChild(imgContainer);
+        }
 
         if (interrupted) {
             const tag = document.createElement("span");
@@ -1129,7 +1154,7 @@
                     }
                     return true;
                 });
-                filteredMessages.forEach(m => addMessage(m.role, m.content, m.interrupted, m.verification, m.id, m.tool_calls));
+                filteredMessages.forEach(m => addMessage(m.role, m.content, m.interrupted, m.verification, m.id, m.tool_calls, m.image_urls));
             }
             
             // 加入新房间
@@ -1400,6 +1425,113 @@
         });
     }
     
+    // 图片上传功能
+    const imageUploadBtn = document.getElementById('image-upload-btn');
+    const chatImageInput = document.getElementById('chat-image-input');
+    let pendingImages = [];  // [{url, name}]
+
+    if (imageUploadBtn && chatImageInput) {
+        imageUploadBtn.addEventListener('click', () => chatImageInput.click());
+
+        chatImageInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            files.forEach(file => {
+                if (file.size > 10 * 1024 * 1024) {
+                    showToast(`${file.name} 超过 10MB 限制`, 'error');
+                    return;
+                }
+                uploadImageFile(file);
+            });
+            chatImageInput.value = '';
+        });
+    }
+
+    // 粘贴图片
+    if (messageInput) {
+        messageInput.addEventListener('paste', (e) => {
+            const items = e.clipboardData?.items || [];
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    e.preventDefault();
+                    const file = item.getAsFile();
+                    if (file) uploadImageFile(file);
+                }
+            }
+        });
+    }
+
+    // 拖拽图片到输入区
+    if (messageInput) {
+        messageInput.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            messageInput.style.borderColor = 'var(--accent, #4a90d9)';
+        });
+        messageInput.addEventListener('dragleave', () => {
+            messageInput.style.borderColor = '';
+        });
+        messageInput.addEventListener('drop', (e) => {
+            e.preventDefault();
+            messageInput.style.borderColor = '';
+            const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+            files.forEach(file => uploadImageFile(file));
+        });
+    }
+
+    async function uploadImageFile(file) {
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const res = await authFetch('/api/upload/image', {
+                method: 'POST',
+                body: formData
+            });
+            if (res.ok) {
+                const data = await res.json();
+                pendingImages.push({ url: data.url, name: file.name });
+                renderImagePreview();
+            } else {
+                showToast(`图片 ${file.name} 上传失败`, 'error');
+            }
+        } catch (err) {
+            console.error('图片上传失败:', err);
+            showToast(`图片 ${file.name} 上传失败`, 'error');
+        }
+    }
+
+    function renderImagePreview() {
+        let preview = document.getElementById('image-preview');
+        if (!preview) {
+            preview = document.createElement('div');
+            preview.id = 'image-preview';
+            preview.className = 'file-preview-area';
+            const inputArea = document.querySelector('.input-area');
+            inputArea.insertBefore(preview, inputArea.querySelector('.input-wrapper'));
+        }
+
+        if (pendingImages.length === 0) {
+            preview.style.display = 'none';
+            preview.innerHTML = '';
+            return;
+        }
+
+        preview.style.display = 'flex';
+        preview.innerHTML = pendingImages.map((img, idx) => `
+            <div class="file-preview-item" style="position:relative;">
+                <img src="${img.url}" style="width:40px;height:40px;border-radius:4px;object-fit:cover;" alt="${img.name}">
+                <span class="file-preview-name" title="${img.name}">${img.name}</span>
+                <button class="file-preview-remove" data-idx="${idx}" title="移除">✕</button>
+            </div>
+        `).join('');
+
+        preview.querySelectorAll('.file-preview-remove').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const idx = parseInt(e.target.dataset.idx);
+                pendingImages.splice(idx, 1);
+                renderImagePreview();
+            });
+        });
+    }
+
     async function uploadFilesAndGetContext(files) {
         if (files.length === 0) return '';
         
@@ -1431,7 +1563,15 @@
 
     async function sendMessage() {
         let content = messageInput.value.trim();
-        if (!content && pendingFiles.length === 0) return;
+        if (!content && pendingFiles.length === 0 && pendingImages.length === 0) return;
+
+        // 收集图片 URL
+        let imageUrls = [];
+        if (pendingImages.length > 0) {
+            imageUrls = pendingImages.map(img => img.url);
+            pendingImages = [];
+            renderImagePreview();
+        }
 
         // 如果有文件，先上传
         if (pendingFiles.length > 0) {
@@ -1449,15 +1589,15 @@
 
         // AI 正在回复时，消息排队（不渲染到聊天区，只在队列卡片里显示）
         if (isStreaming) {
-            messageQueue.push({ content, isAgent: agentModeEnabled });
+            messageQueue.push({ content, isAgent: agentModeEnabled, imageUrls });
             renderQueueMessages();
             return;
         }
 
-        await executeSend(content);
+        await executeSend(content, false, imageUrls);
     }
 
-    async function executeSend(content, skipAddMessage = false) {
+    async function executeSend(content, skipAddMessage = false, imageUrls = []) {
         // Agent 模式：调用 Agent API
         if (agentModeEnabled) {
             if (!currentConvId) {
@@ -1493,7 +1633,7 @@
             addConvToSidebar(conv.id, conv.title);
         }
 
-        if (!skipAddMessage) addMessage("user", content);
+        if (!skipAddMessage) addMessage("user", content, undefined, undefined, undefined, undefined, imageUrls);
         isStreaming = true;
         sendBtn.disabled = true;
         interruptBtn.style.display = "inline-block";
@@ -1516,7 +1656,7 @@
             conversation_id: currentConvId,
             content: content,
             model: modelSelector.value,
-            image_urls: []
+            image_urls: imageUrls
         });
         
         setTimeout(() => {
@@ -1603,7 +1743,7 @@
         const next = messageQueue.shift();
         renderQueueMessages();
         // 队列执行时正常 addMessage，把用户消息渲染到聊天区
-        executeSend(next.content, false);
+        executeSend(next.content, false, next.imageUrls || []);
     }
 
     function createCursor() {
@@ -2649,6 +2789,171 @@
         return num.toString();
     }
 
+    // ===== MCP 服务器管理 =====
+    async function loadMcpCount() {
+        try {
+            const res = await authFetch('/api/skills/mcp/servers');
+            if (!res.ok) return;
+            const data = await res.json();
+            const count = data.count || 0;
+            const badge = document.getElementById('mcp-count');
+            if (badge) badge.textContent = count;
+        } catch (e) {
+            // MCP 未启用时静默忽略
+        }
+    }
+
+    async function loadMcpServers() {
+        const listDiv = document.getElementById('mcp-server-list');
+        if (!listDiv) return;
+        listDiv.innerHTML = '<div style="color:#888;">加载中...</div>';
+
+        try {
+            const res = await authFetch('/api/skills/mcp/servers');
+            if (!res.ok) {
+                listDiv.innerHTML = '<div style="color:#888;">MCP 未启用</div>';
+                return;
+            }
+            const data = await res.json();
+
+            if (!data.servers || data.servers.length === 0) {
+                listDiv.innerHTML = '<div style="color:#888;">暂无已连接的 MCP 服务器</div>';
+                return;
+            }
+
+            listDiv.innerHTML = data.servers.map(s => `
+                <div class="mcp-server-item" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;margin-bottom:6px;">
+                    <div>
+                        <span style="font-weight:600;">${escapeHtml(s.name)}</span>
+                        <span style="color:${s.connected ? '#22c55e' : '#ef4444'};font-size:0.85rem;margin-left:6px;">${s.connected ? '● 已连接' : '○ 未连接'}</span>
+                        <span style="color:#888;font-size:0.8rem;margin-left:6px;">${s.transport} · ${s.tools_count} 个工具</span>
+                    </div>
+                    <div>
+                        <button class="mcp-reconnect-btn" data-name="${s.name}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;">重连</button>
+                        <button class="mcp-remove-btn" data-name="${s.name}" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;">移除</button>
+                    </div>
+                </div>
+            `).join('');
+
+            // 绑定重连
+            listDiv.querySelectorAll('.mcp-reconnect-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const name = btn.dataset.name;
+                    btn.textContent = '重连中...';
+                    try {
+                        await authFetch(`/api/skills/mcp/servers/${name}/reconnect`, { method: 'POST' });
+                        loadMcpServers();
+                        loadMcpCount();
+                    } catch (e) {
+                        btn.textContent = '重连';
+                        showToast('重连失败', 'error');
+                    }
+                });
+            });
+
+            // 绑定移除
+            listDiv.querySelectorAll('.mcp-remove-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const name = btn.dataset.name;
+                    if (!confirm(`确定移除 MCP 服务器 "${name}" 吗？`)) return;
+                    try {
+                        await authFetch(`/api/skills/mcp/servers/${name}/remove`, { method: 'POST' });
+                        loadMcpServers();
+                        loadMcpCount();
+                    } catch (e) {
+                        showToast('移除失败', 'error');
+                    }
+                });
+            });
+
+        } catch (e) {
+            listDiv.innerHTML = '<div style="color:#ef4444;">加载失败</div>';
+        }
+    }
+
+    // MCP 管理按钮
+    const mcpManageBtn = document.getElementById('mcp-manage-btn');
+    const mcpModal = document.getElementById('mcp-modal');
+    if (mcpManageBtn && mcpModal) {
+        mcpManageBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            loadMcpServers();
+            mcpModal.style.display = 'flex';
+        });
+
+        // 关闭按钮
+        mcpModal.querySelector('.modal-cancel').addEventListener('click', () => {
+            mcpModal.style.display = 'none';
+        });
+        mcpModal.addEventListener('click', (e) => {
+            if (e.target === mcpModal) mcpModal.style.display = 'none';
+        });
+
+        // 传输方式切换
+        const transportSelect = document.getElementById('mcp-transport-input');
+        if (transportSelect) {
+            transportSelect.addEventListener('change', () => {
+                const isStdio = transportSelect.value === 'stdio';
+                document.getElementById('mcp-stdio-fields').style.display = isStdio ? 'block' : 'none';
+                document.getElementById('mcp-sse-fields').style.display = isStdio ? 'none' : 'block';
+            });
+        }
+
+        // 添加按钮
+        const addBtn = document.getElementById('mcp-add-btn');
+        if (addBtn) {
+            addBtn.addEventListener('click', async () => {
+                const name = document.getElementById('mcp-name-input').value.trim();
+                const transport = document.getElementById('mcp-transport-input').value;
+                const command = document.getElementById('mcp-command-input').value.trim();
+                const argsStr = document.getElementById('mcp-args-input').value.trim();
+                const url = document.getElementById('mcp-url-input').value.trim();
+                const envStr = document.getElementById('mcp-env-input').value.trim();
+
+                if (!name) { showToast('请输入服务器名称', 'error'); return; }
+
+                const body = { name, transport, command, url, args: [], headers: {}, env: {} };
+                if (transport === 'stdio') {
+                    if (!command) { showToast('请输入命令', 'error'); return; }
+                    body.args = argsStr ? argsStr.split(',').map(a => a.trim()) : [];
+                } else {
+                    if (!url) { showToast('请输入 URL', 'error'); return; }
+                }
+                if (envStr) {
+                    try { body.env = JSON.parse(envStr); }
+                    catch { showToast('环境变量 JSON 格式错误', 'error'); return; }
+                }
+
+                addBtn.textContent = '连接中...';
+                addBtn.disabled = true;
+                try {
+                    const res = await authFetch('/api/skills/mcp/servers/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        showToast(`MCP 服务器 ${name} 连接成功`, 'success');
+                        document.getElementById('mcp-name-input').value = '';
+                        document.getElementById('mcp-command-input').value = '';
+                        document.getElementById('mcp-args-input').value = '';
+                        document.getElementById('mcp-url-input').value = '';
+                        document.getElementById('mcp-env-input').value = '';
+                        loadMcpServers();
+                        loadMcpCount();
+                    } else {
+                        showToast(data.error || '连接失败', 'error');
+                    }
+                } catch (e) {
+                    showToast('连接失败: ' + e.message, 'error');
+                }
+                addBtn.textContent = '添加并连接';
+                addBtn.disabled = false;
+            });
+        }
+    }
+
     async function showTokenStatsModal() {
         try {
             const response = await authFetch('/api/stats/token-usage');
@@ -2661,60 +2966,106 @@
                     <button class="modal-close-btn" title="关闭 (ESC)">&times;</button>
                     <div class="modal-header">
                         <h2>📊 Token 用量统计</h2>
+                        <div class="stats-period-tabs">
+                            <button class="period-btn" data-period="day">今天</button>
+                            <button class="period-btn active" data-period="week">本周</button>
+                            <button class="period-btn" data-period="month">本月</button>
+                            <button class="period-btn" data-period="all">全部</button>
+                        </div>
                     </div>
                     <div class="modal-body">
-                        <div class="stats-summary">
-                            <div class="stat-card">
-                                <div class="stat-icon">💬</div>
-                                <div class="stat-value">${formatNumber(data.total_tokens)}</div>
-                                <div class="stat-label">总 Token</div>
-                            </div>
-                            <div class="stat-card stat-input">
-                                <div class="stat-icon">⬇️</div>
-                                <div class="stat-value">${formatNumber(data.total_input_tokens)}</div>
-                                <div class="stat-label">输入 Token</div>
-                            </div>
-                            <div class="stat-card stat-output">
-                                <div class="stat-icon">⬆️</div>
-                                <div class="stat-value">${formatNumber(data.total_output_tokens)}</div>
-                                <div class="stat-label">输出 Token</div>
-                            </div>
-                            <div class="stat-card stat-cached">
-                                <div class="stat-icon">💾</div>
-                                <div class="stat-value">${formatNumber(data.total_cached_tokens)}</div>
-                                <div class="stat-label">缓存命中 (${data.cache_hit_rate || 0}%)</div>
-                            </div>
-                            <div class="stat-card stat-cost">
-                                <div class="stat-icon">💰</div>
-                                <div class="stat-value">¥${(data.estimated_cost || 0).toFixed(2)}</div>
-                                <div class="stat-label">预估费用</div>
-                            </div>
-                        </div>
-                        <div class="stats-chart">
-                            <div class="chart-header">
-                                <h3>最近7天用量趋势</h3>
-                                <div class="chart-legend">
-                                    <span class="legend-item"><span class="legend-color" style="background:#2196F3"></span>输入 Token</span>
-                                    <span class="legend-item"><span class="legend-color" style="background:#FF9800"></span>输出 Token</span>
-                                </div>
-                            </div>
-                            <div class="chart-container">
-                                ${data.daily_stats.map(day => `
-                                    <div class="chart-bar" style="height: ${Math.max(5, (day.total / Math.max(...data.daily_stats.map(d => d.total), 1)) * 100)}%">
-                                        <div class="bar-input" style="height: ${(day.input / day.total * 100) || 0}%"></div>
-                                        <div class="bar-output" style="height: ${(day.output / day.total * 100) || 0}%"></div>
-                                    </div>
-                                `).join('')}
-                            </div>
-                            <div class="chart-labels">
-                                ${data.daily_stats.map(day => `<span>${day.date}</span>`).join('')}
-                            </div>
-                        </div>
+                        <div id="stats-content"></div>
                     </div>
                 </div>
             `;
             
             document.body.appendChild(modal);
+            
+            function renderStats(data) {
+                const content = document.getElementById('stats-content');
+                const maxTotal = Math.max(...(data.daily_stats || []).map(d => d.total), 1);
+                const cacheRate = data.cache_hit_rate || 0;
+                
+                content.innerHTML = `
+                    <div class="stats-summary">
+                        <div class="stat-card">
+                            <div class="stat-icon">💬</div>
+                            <div class="stat-value">${formatNumber(data.total_tokens)}</div>
+                            <div class="stat-label">总 Token</div>
+                        </div>
+                        <div class="stat-card stat-input">
+                            <div class="stat-icon">⬇️</div>
+                            <div class="stat-value">${formatNumber(data.total_input_tokens)}</div>
+                            <div class="stat-label">输入 Token</div>
+                        </div>
+                        <div class="stat-card stat-output">
+                            <div class="stat-icon">⬆️</div>
+                            <div class="stat-value">${formatNumber(data.total_output_tokens)}</div>
+                            <div class="stat-label">输出 Token</div>
+                        </div>
+                        <div class="stat-card stat-cached">
+                            <div class="stat-icon">💾</div>
+                            <div class="stat-value">${formatNumber(data.total_cached_tokens)}</div>
+                            <div class="stat-label">缓存命中 (${cacheRate}%)</div>
+                            <div class="cache-bar" style="margin-top:4px;height:4px;border-radius:2px;background:rgba(0,0,0,0.1);overflow:hidden;">
+                                <div style="height:100%;width:${cacheRate}%;background:#22c55e;border-radius:2px;transition:width 0.3s;"></div>
+                            </div>
+                        </div>
+                        <div class="stat-card stat-cost">
+                            <div class="stat-icon">💰</div>
+                            <div class="stat-value">¥${(data.estimated_cost || 0).toFixed(2)}</div>
+                            <div class="stat-label">预估费用</div>
+                        </div>
+                        <div class="stat-card stat-msgs">
+                            <div class="stat-icon">📝</div>
+                            <div class="stat-value">${formatNumber(data.total_messages)}</div>
+                            <div class="stat-label">消息数</div>
+                        </div>
+                    </div>
+                    ${data.daily_stats && data.daily_stats.length > 0 ? `
+                    <div class="stats-chart">
+                        <div class="chart-header">
+                            <h3>用量趋势</h3>
+                            <div class="chart-legend">
+                                <span class="legend-item"><span class="legend-color" style="background:#2196F3"></span>输入</span>
+                                <span class="legend-item"><span class="legend-color" style="background:#FF9800"></span>输出</span>
+                                <span class="legend-item"><span class="legend-color" style="background:#22c55e"></span>缓存</span>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            ${data.daily_stats.map(day => `
+                                <div class="chart-bar" style="height: ${Math.max(5, (day.total / maxTotal) * 100)}%">
+                                    <div class="bar-input" style="height: ${(day.input / day.total * 100) || 0}%"></div>
+                                    <div class="bar-output" style="height: ${(day.output / day.total * 100) || 0}%"></div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <div class="chart-labels">
+                            ${data.daily_stats.map(day => `<span>${day.date}</span>`).join('')}
+                        </div>
+                    </div>
+                    ` : ''}
+                `;
+            }
+            
+            renderStats(data);
+            
+            // 时间范围切换
+            modal.querySelectorAll('.period-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    modal.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    const period = btn.dataset.period;
+                    document.getElementById('stats-content').innerHTML = '<div style="text-align:center;padding:40px;color:#888;">加载中...</div>';
+                    try {
+                        const res = await authFetch(`/api/stats/token-usage?period=${period}`);
+                        const newData = await res.json();
+                        renderStats(newData);
+                    } catch (e) {
+                        document.getElementById('stats-content').innerHTML = '<div style="text-align:center;padding:40px;color:#ef4444;">加载失败</div>';
+                    }
+                });
+            });
             
             // 关闭函数
             const closeModal = () => {
@@ -2722,15 +3073,9 @@
                 setTimeout(() => modal.remove(), 200);
             };
             
-            // 关闭按钮事件
             modal.querySelector('.modal-close-btn').addEventListener('click', closeModal);
+            modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
             
-            // 点击遮罩层关闭
-            modal.addEventListener('click', (e) => {
-                if (e.target === modal) closeModal();
-            });
-            
-            // ESC 键关闭
             const escHandler = (e) => {
                 if (e.key === 'Escape') {
                     closeModal();
@@ -2739,7 +3084,6 @@
             };
             document.addEventListener('keydown', escHandler);
             
-            // 入场动画
             setTimeout(() => modal.style.opacity = '1', 10);
             
         } catch (error) {
@@ -2756,6 +3100,7 @@
         loadKnowledgeCount();
         loadCodeReposCount();
         loadTokenStats();
+        loadMcpCount();
         
         // Token统计按钮
         const tokenStatsBtn = document.getElementById('token-stats-btn');

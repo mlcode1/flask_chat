@@ -54,6 +54,9 @@ COMPRESS_RETAIN_RATIO = 0.5
 # 最少保留消息数
 MIN_RECENT_MESSAGES = 4
 
+# 摘要最大 token 数（超过此值时触发二次压缩）
+SUMMARY_MAX_TOKENS = 500
+
 
 class ContextService:
 
@@ -353,9 +356,29 @@ class ContextService:
         except Exception as e:
             logger.warning("提取记忆失败: %s", e)
 
-        # 3. 更新摘要
+        # 3. 更新摘要（含二次压缩：摘要过长时压缩旧摘要）
         if conversation.summary:
-            conversation.summary = f"{conversation.summary}\n\n{new_summary}"
+            combined_summary = f"{conversation.summary}\n\n{new_summary}"
+            # 如果摘要过长，压缩成更短的版本
+            if self.count_tokens(combined_summary) > SUMMARY_MAX_TOKENS:
+                logger.info(f"摘要过长({self.count_tokens(combined_summary)}token)，触发二次压缩")
+                try:
+                    re_compress_prompt = f"""请将以下多段对话摘要合并为一段更精简的摘要。要求：
+1. 保留所有关键信息（用户问题、AI回答要点、重要决策）
+2. 去除重复内容
+3. 控制在 150 字以内
+
+原摘要：
+{combined_summary}
+
+合并后的摘要："""
+                    conversation.summary = ai_service.sync_complete(re_compress_prompt)
+                    logger.info("摘要二次压缩完成")
+                except Exception as e:
+                    logger.warning(f"摘要二次压缩失败: {e}")
+                    conversation.summary = combined_summary
+            else:
+                conversation.summary = combined_summary
         else:
             conversation.summary = new_summary
 

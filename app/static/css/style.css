@@ -2284,6 +2284,11 @@ textarea.form-control {
 
 .stats-modal .modal-header {
     padding: 24px 28px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .stats-modal .modal-header h2 {
@@ -2291,6 +2296,34 @@ textarea.form-control {
     font-weight: 600;
     color: #1a1a1a;
     margin: 0;
+}
+
+.stats-period-tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--bg-tertiary, #f0f0f0);
+    border-radius: 8px;
+    padding: 2px;
+}
+
+.period-btn {
+    padding: 4px 12px;
+    border: none;
+    background: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--text-secondary, #666);
+    transition: all 0.2s;
+}
+
+.period-btn:hover {
+    color: var(--text-primary, #333);
+}
+
+.period-btn.active {
+    background: var(--accent, #4a90d9);
+    color: white;
 }
 
 .stats-modal .modal-body {

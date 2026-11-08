@@ -9,7 +9,11 @@ import sys
 import os
 import re
 import tempfile
+import threading
+import time
+from collections import defaultdict
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from flask import current_app
 
 logger = logging.getLogger(__name__)
@@ -17,6 +21,14 @@ logger = logging.getLogger(__name__)
 # ========== Skill 和 MCP 全局实例 ==========
 _skill_loader = None
 _mcp_manager = None
+
+# ========== 工具熔断器 ==========
+# 记录每个工具的失败次数，超过阈值后熔断
+_tool_failure_counts = defaultdict(int)
+_tool_last_failure_time = defaultdict(float)
+CIRCUIT_BREAKER_THRESHOLD = 5       # 连续失败 N 次后熔断
+CIRCUIT_BREAKER_RESET_SECONDS = 60   # 熔断后 60 秒内不再调用
+TOOL_TIMEOUT_SECONDS = 30            # 单次工具执行超时时间
 
 
 def _get_skill_loader():
@@ -363,9 +375,49 @@ def get_dangerous_tool_reason(tool_name):
     return DANGEROUS_TOOLS.get(tool_name, "该操作可能存在风险")
 
 
+def _check_circuit_breaker(name):
+    """检查工具是否被熔断"""
+    if _tool_failure_counts[name] >= CIRCUIT_BREAKER_THRESHOLD:
+        elapsed = time.time() - _tool_last_failure_time[name]
+        if elapsed < CIRCUIT_BREAKER_RESET_SECONDS:
+            return True  # 已熔断，拒绝调用
+        else:
+            # 熔断时间已过，重置计数
+            _tool_failure_counts[name] = 0
+    return False
+
+
+def _record_tool_result(name, success):
+    """记录工具执行结果，更新熔断器状态"""
+    if success:
+        _tool_failure_counts[name] = 0
+    else:
+        _tool_failure_counts[name] += 1
+        _tool_last_failure_time[name] = time.time()
+        if _tool_failure_counts[name] >= CIRCUIT_BREAKER_THRESHOLD:
+            logger.warning(f"工具 '{name}' 已熔断（连续失败 {_tool_failure_counts[name]} 次），{CIRCUIT_BREAKER_RESET_SECONDS}秒内不再调用")
+
+
+def _execute_with_timeout(func, timeout=TOOL_TIMEOUT_SECONDS):
+    """在独立线程中执行函数，超时返回 None"""
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func)
+    try:
+        result = future.result(timeout=timeout)
+        executor.shutdown(wait=False)
+        return result
+    except FuturesTimeoutError:
+        executor.shutdown(wait=False)
+        return None  # 调用方根据 None 判断超时
+    except Exception as e:
+        executor.shutdown(wait=False)
+        raise e
+
+
 def execute_tool(name, arguments, user_id=None):
     """
     执行工具调用（支持内置工具 + Skill + MCP）
+    包含超时控制和熔断机制。
     
     工具名称格式：
     - 内置工具：get_current_time, calculate, web_search 等
@@ -374,7 +426,13 @@ def execute_tool(name, arguments, user_id=None):
     """
     args = json.loads(arguments) if isinstance(arguments, str) else arguments
 
-    # 确保 session 干净：如果之前有工具执行失败导致事务异常，先 rollback
+    # 熔断检查
+    if _check_circuit_breaker(name):
+        return json.dumps({
+            "error": f"工具 '{name}' 因连续失败已被熔断，请稍后重试"
+        }, ensure_ascii=False)
+
+    # 确保 session 干净
     try:
         from app.extensions import db
         if db.session.is_active:
@@ -382,49 +440,61 @@ def execute_tool(name, arguments, user_id=None):
     except Exception:
         pass
 
-    try:
-        # 检查是否是带前缀的工具（格式：prefix__tool_name）
-        # 前缀可能是 MCP 服务器名或 Skill 名
-        if '__' in name:
-            prefix, tool_name = name.split('__', 1)
-            
-            # 优先检查是否是 MCP 工具（前缀匹配已连接的 MCP 服务器）
-            mcp_manager = _get_mcp_manager()
-            if mcp_manager and prefix in mcp_manager.servers:
-                logger.info(f"Executing MCP tool: {name}")
-                try:
-                    result = mcp_manager.execute_tool_sync(name, args)
-                    return result
-                except Exception as e:
-                    logger.error(f"MCP tool execution failed: {e}", exc_info=True)
-                    return json.dumps({"error": f"MCP 工具执行失败: {str(e)}"}, ensure_ascii=False)
-            
-            # 否则尝试 Skill 工具
-            logger.info(f"Executing skill tool: {prefix}.{tool_name}")
-            try:
-                skill_loader = _get_skill_loader()
-                result = skill_loader.execute_tool(tool_name, args, prefix)
-                return result
-            except Exception as e:
-                logger.error(f"Skill tool execution failed: {e}", exc_info=True)
-                return json.dumps({"error": f"技能工具执行失败: {str(e)}"}, ensure_ascii=False)
-        
-        # 否则执行内置工具
-        else:
-            result = _dispatch_tool(name, args, user_id=user_id)
-            return result
-        
-    except Exception as e:
-        # 工具执行异常时 rollback，防止后续工具连锁报 InFailedSqlTransaction
+    def _do_execute():
+        """实际执行工具的内部函数（在超时线程中运行）"""
         try:
-            from app.extensions import db
-            db.session.rollback()
-        except Exception:
-            pass
-        # 日志记录完整异常信息
-        logger.error(f"工具 '{name}' 执行异常: {e}", exc_info=True)
-        # 返回用户友好的错误信息，不暴露技术细节
-        return json.dumps({"error": f"工具执行失败，请稍后重试", "results": []}, ensure_ascii=False)
+            # 检查是否是带前缀的工具（格式：prefix__tool_name）
+            # 前缀可能是 MCP 服务器名或 Skill 名
+            if '__' in name:
+                prefix, tool_name = name.split('__', 1)
+                
+                # 优先检查是否是 MCP 工具（前缀匹配已连接的 MCP 服务器）
+                mcp_manager = _get_mcp_manager()
+                if mcp_manager and prefix in mcp_manager.servers:
+                    logger.info(f"Executing MCP tool: {name}")
+                    try:
+                        return mcp_manager.execute_tool_sync(name, args)
+                    except Exception as e:
+                        logger.error(f"MCP tool execution failed: {e}", exc_info=True)
+                        return json.dumps({"error": f"MCP 工具执行失败: {str(e)}"}, ensure_ascii=False)
+                
+                # 否则尝试 Skill 工具
+                logger.info(f"Executing skill tool: {prefix}.{tool_name}")
+                try:
+                    skill_loader = _get_skill_loader()
+                    return skill_loader.execute_tool(tool_name, args, prefix)
+                except Exception as e:
+                    logger.error(f"Skill tool execution failed: {e}", exc_info=True)
+                    return json.dumps({"error": f"技能工具执行失败: {str(e)}"}, ensure_ascii=False)
+            
+            # 否则执行内置工具
+            else:
+                return _dispatch_tool(name, args, user_id=user_id)
+                
+        except Exception as e:
+            try:
+                from app.extensions import db
+                db.session.rollback()
+            except Exception:
+                pass
+            logger.error(f"工具 '{name}' 执行异常: {e}", exc_info=True)
+            return json.dumps({"error": "工具执行失败，请稍后重试", "results": []}, ensure_ascii=False)
+
+    # 带超时执行
+    result = _execute_with_timeout(_do_execute)
+    
+    if result is None:
+        # 超时
+        _record_tool_result(name, success=False)
+        return json.dumps({
+            "error": f"工具 '{name}' 执行超时（{TOOL_TIMEOUT_SECONDS}秒），已终止"
+        }, ensure_ascii=False)
+    
+    # 检查结果是否包含错误
+    is_error = isinstance(result, str) and '"error"' in result
+    _record_tool_result(name, success=not is_error)
+    
+    return result
 
 
 def _dispatch_tool(name, args, user_id=None):
