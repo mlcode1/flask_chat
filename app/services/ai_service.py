@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # 全局存储待确认的工具调用事件
 _pending_tool_confirmations = {}
 
+# 工具调用最大轮次，防止模型陷入工具调用死循环
+MAX_TOOL_ROUNDS = 10
+
 
 class AIService:
 
@@ -69,6 +72,7 @@ class AIService:
         total_input_tokens = 0
         total_output_tokens = 0
         total_cached_tokens = 0  # 缓存命中的token数
+        tool_rounds = 0          # 工具调用轮次计数，防止死循环
 
         while True:
             if stop_event and stop_event.is_set():
@@ -78,7 +82,23 @@ class AIService:
                 return
 
             has_tool_calls = False
-            tools = get_tools(user_id)
+
+            # 达到最大轮次后撤掉工具，强制模型基于已有信息直接作答
+            if tool_rounds >= MAX_TOOL_ROUNDS:
+                logger.warning(
+                    f"工具调用已达最大轮次 {MAX_TOOL_ROUNDS}，撤掉工具强制模型直接作答"
+                )
+                tools = None
+                messages = list(messages) + [{
+                    "role": "system",
+                    "content": (
+                        "你已达到本次对话的工具调用次数上限，不能再调用任何工具。"
+                        "请基于已获取的信息直接给出最终回答；"
+                        "如果信息不足以完整回答，请明确说明哪些部分无法确认。"
+                    )
+                }]
+            else:
+                tools = get_tools(user_id)
             
             # 带重试的 API 调用
             def call_api():
@@ -154,6 +174,16 @@ class AIService:
                     yield delta.content
 
             if not has_tool_calls:
+                break
+
+            # 兜底保护：已撤掉工具却仍收到 tool_calls（部分模型不遵守 tools=None）。
+            # 必须在执行前拦截，否则危险工具（如 run_shell）会被实际执行。
+            if tool_rounds >= MAX_TOOL_ROUNDS:
+                logger.error(
+                    f"工具调用轮次已达上限 {MAX_TOOL_ROUNDS} 但模型仍返回 tool_calls，"
+                    f"拒绝执行并终止循环"
+                )
+                yield "\n\n> ⚠️ 已达工具调用次数上限，本次回答基于已获取的信息生成。"
                 break
 
             tool_calls_list = list(tool_calls_accumulator.values())
@@ -240,7 +270,8 @@ class AIService:
 
             full_content = ""
             tool_calls_accumulator = {}
-        
+            tool_rounds += 1
+
         # 正常结束时回调usage数据
         if on_usage:
             on_usage(total_input_tokens, total_output_tokens, total_cached_tokens)
