@@ -6,7 +6,7 @@
 
 ### 项目简介
 
-Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用户认证、多模型切换、WebSocket 流式输出、工具调用、上下文压缩与长期记忆、RAG（检索增强生成）知识库系统、代码库索引管理、对话模板、Agent 工作流、语音输入、Webhook 集成、LangSmith 全链路监控、AI 回答结果验证。数据存储在 PostgreSQL（含 pgvector 向量扩展）中，前端采用原生 JavaScript 单页应用。
+Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用户认证、多模型切换、WebSocket 流式输出、三层工具调用体系（内置工具 / Skill 插件 / MCP 协议）、上下文压缩与长期记忆、RAG（检索增强生成）知识库系统、代码库索引管理、对话模板、Agent 工作流、语音输入、多模态图片理解、Webhook 集成、LangSmith 全链路监控、AI 回答结果验证。数据存储在 PostgreSQL（含 pgvector 向量扩展）中，Embedding 使用 Ollama 本地模型，前端采用原生 JavaScript 单页应用。
 
 ### 功能特性
 
@@ -19,14 +19,18 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用�
 - **WebSocket 流式输出** — 基于 Flask-SocketIO + eventlet 实现实时双向通信，逐字流式响应
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
 - **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、知识库检索、代码库检索等工具；支持 Skill 插件系统（本地 Python 插件，热加载，命名空间隔离）和 MCP 协议集成（通过 stdio/SSE 连接外部工具服务器，自动发现工具并注册）
+- **工具可靠性保障** — 单次执行 30 秒超时控制（`ThreadPoolExecutor`），连续失败 5 次自动熔断 60 秒，防止异常工具拖垮系统
+- **MCP 服务器管理 UI** — 侧边栏可视化查看连接状态与工具列表，支持运行时添加、重连、移除，无需改配置文件
 - **消息排队** — AI 回复过程中用户可继续输入消息，消息排队等待，队列中的消息可编辑（恢复到输入框）和取消；AI 回复完成后自动发送队列中的下一条消息
 - **消息编辑与删除** — 支持 hover 编辑用户消息（编辑后重新生成 AI 回复）和删除消息（删除该消息及之后的所有消息）
 - **工具调用中断** — 工具执行过程中检测中断信号，执行完当前工具后跳过后续工具调用，避免长时间阻塞
+- **多模态图片理解** — 支持按钮上传、Ctrl+V 粘贴、拖拽三种方式添加图片，随消息发送给模型；聊天气泡内渲染缩略图，点击查看大图
 - **工具开关控制** — 知识库查询和代码库查询工具可通过页面顶部开关实时启用/禁用，无需重启服务
-- **RAG 知识检索** — 上传文档后，AI 可通过工具调用自动检索知识库回答问题；支持 BM25 + 向量混合检索（BM25 索引缓存，避免重复构建）、多查询重写、结果重排序
-- **代码库索引管理** — 通过 Web UI 管理代码仓库配置（名称 + 本地路径），支持全量构建与增量构建（混合方案：文件修改时间 + SHA256 哈希双重过滤），构建过程 WebSocket 实时进度推送，支持取消任务；AI 在对话中通过 `search_code` 工具自动检索相关代码片段
+- **RAG 知识检索** — 上传文档后，AI 可通过工具调用自动检索知识库回答问题；向量召回（pgvector 余弦相似度）+ BM25 重排的混合检索（BM25 索引缓存，避免重复构建）、多查询重写、结果重排序
+- **代码库索引管理** — 通过 Web UI 管理代码仓库配置（名称 + 本地路径），支持全量构建与增量构建（基于 SHA256 内容哈希比对，识别新增/修改/删除文件），构建过程 WebSocket 实时进度推送，支持取消任务；AI 在对话中通过 `search_code` 工具自动检索相关代码片段
 - **本地模型支持** — 通过 Ollama 可直接使用本地部署的大语言模型和 Embedding 模型，无需任何云服务；Embedding 也可接入第三方服务
-- **多轮记忆与上下文压缩** — 结构化摘要 + 长期记忆，跨轮次保留关键信息；对话过长时自动压缩历史消息，节省 Token 用量
+- **多轮记忆与上下文压缩** — 三层记忆（短期消息 / 结构化摘要 / 长期记忆 JSON），跨轮次保留关键信息；对话过长时自动压缩历史消息；摘要自身超长时触发二次压缩，防止无限膨胀
+- **用量分析仪表盘** — Token 用量统计面板，支持今天/本周/本月/全部四档切换，展示输入输出 Token、缓存命中率（可视化进度条）、预估费用、消息数、7 天用量趋势图
 - **结果验证（Result Verification）** — 可选开关，开启后由另一个 Agent 对 AI 回答进行事实、逻辑、完整性与清晰度的多维度验证
 - **协作与分享** — 一键生成分享链接（`/share/<token>` 公开查看页）、对话导出（Markdown / JSON / TXT）
 - **消息分页** — 支持游标分页加载历史消息，避免长对话一次性加载所有消息
@@ -42,22 +46,23 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用�
 
 | 组件 | 技术 |
 |------|------|
-| 后端框架 | Flask |
+| 后端框架 | Flask 3.1（应用工厂 + Blueprint） |
 | 实时通信 | Flask-SocketIO + eventlet（WebSocket） |
-| ORM | Flask-SQLAlchemy |
+| ORM | Flask-SQLAlchemy（手写 SQL 迁移脚本） |
 | 数据库 | PostgreSQL + pgvector |
-| 认证 | PyJWT（JWT Token） |
-| 缓存 | 内存缓存 / Redis（双模式，可切换） |
-| LLM 接口 | OpenAI SDK（兼容任意 OpenAI 协议的服务） |
-| Embedding 模型 | Ollama（qwen3-embedding:8b）或第三方 Embedding 服务 |
-| 向量检索 | pgvector（余弦相似度 + BM25 混合检索） |
-| 代码索引构建 | LlamaIndex + CodeSplitter（tree-sitter）+ PGVectorStore |
+| 认证 | PyJWT（JWT Token，WebSocket 亦走 JWT） |
+| 缓存/限流 | 内存缓存 / Redis（双模式，可切换） |
+| LLM 接口 | OpenAI SDK（兼容任意 OpenAI 协议服务，实际接火山引擎网关） |
+| Embedding 模型 | Ollama（qwen3-embedding:8b，4096 维）或第三方 Embedding 服务 |
+| 向量检索 | pgvector（余弦相似度召回 + BM25 重排的混合检索） |
+| RAG / 代码索引构建 | LlamaIndex + CodeSplitter（tree-sitter）+ PGVectorStore |
 | 文件解析 | pypdf、python-docx |
+| 工具扩展 | MCP SDK（stdio/SSE）+ 自研 Skill 插件（importlib 热加载） |
 | 可观测性 | LangSmith（`@traceable` 装饰器 + 环境变量） |
-| 安全 | JWT 认证、API Key 认证、Prompt Injection 过滤、用户级数据隔离 |
-| 代码索引查询 | psycopg2（直连 pgvector 索引） |
+| 安全 | JWT 认证、API Key 认证、Prompt Injection 过滤、路径白名单、敏感信息脱敏、用户级数据隔离 |
+| 可靠性 | 工具超时（ThreadPoolExecutor）+ 熔断器、模型重试与降级、启动状态自愈 |
 | 容器化 | Docker + docker-compose |
-| 前端 | 原生 HTML / CSS / JavaScript（IIFE + marked.js 渲染 Markdown） |
+| 前端 | 原生 HTML / CSS / JavaScript（IIFE + marked.js 渲染 Markdown，无构建工具） |
 
 ### 项目结构
 
@@ -440,10 +445,16 @@ EMBEDDING_DIM=3072
 - **重命名对话** — 鼠标悬停在左侧某条对话上，点击出现的编辑按钮（✎）即可原地重命名
 - **切换模型** — 在顶部下拉框选择不同的大语言模型
 - **打断生成** — AI 回复时点击「打断」按钮停止生成
+- **消息排队** — AI 回复过程中可继续输入并发送，消息以卡片形式排在输入框上方；卡片上的 ✏️ 可将内容取回输入框编辑，✕ 可直接取消；当前回复结束后自动依次发送
+- **编辑消息** — 鼠标悬停在自己发送的消息上，点击 ✏️ 进入编辑，保存后该消息及其之后的所有消息会被删除，并以新内容重新生成 AI 回复
+- **删除消息** — 鼠标悬停在自己发送的消息上，点击 🗑️，会删除该消息及其之后的所有消息
+- **发送图片** — 三种方式：点击输入框旁的 📷 按钮选择图片、直接 Ctrl+V 粘贴剪贴板图片、或把图片拖拽到输入框；图片以缩略图预览，可单独移除；点击聊天气泡中的图片可查看大图
 - **Agent 模式** — 点击「Agent」按钮开启多步骤推理模式，Agent 会自动规划、调用工具、展示执行步骤
 - **语音输入** — 点击麦克风按钮开始录音，识别结果自动填入输入框（需浏览器支持 Web Speech API）
 - **知识库管理** — 侧边栏点击「知识库管理」进入独立页面，支持上传文档（`.txt`、`.md`、`.pdf`、`.docx`）、删除文档、查看统计信息
 - **代码库管理** — 侧边栏点击「代码库管理」进入独立页面，支持添加代码仓库、全量/增量构建索引、查看进度、取消任务、搜索测试、删除仓库
+- **MCP 服务器管理** — 侧边栏点击「MCP 服务器」打开管理面板，可查看各服务器连接状态与工具数量，运行时添加（stdio/sse）、重连、移除
+- **用量统计** — 侧边栏点击「用量统计」打开仪表盘，可切换今天/本周/本月/全部，查看 Token 用量、缓存命中率、预估费用与趋势图
 - **结果验证** — 顶部打开「结果验证」开关后，AI 回答完成后会自动触发验证
 - **分享对话** — 点击顶部「分享」按钮生成公开链接
 - **导出对话** — 点击顶部「导出」按钮，选择 Markdown / JSON / TXT 格式下载
@@ -621,14 +632,19 @@ pytest tests/ -v -s
 | 事件 | 方向 | 说明 |
 |------|------|------|
 | `connect` | → 服务端 | 连接（可传 `auth.token` 进行 JWT 认证） |
-| `chat_message` | → 服务端 | 发送消息（`conversation_id`, `content`, `model`） |
+| `chat_message` | → 服务端 | 发送消息（`conversation_id`, `content`, `model`, `image_urls`） |
+| `join` | → 服务端 | 加入对话房间（同时触发断线生成恢复检测） |
+| `leave` | → 服务端 | 离开对话房间 |
+| `stop_generation` | → 服务端 | 打断生成 |
+| `message_created` | ← 客户端 | 消息已创建，返回 `message_id` |
 | `token` | ← 客户端 | 接收增量文本片段 |
 | `tool_calls` | ← 客户端 | 接收工具调用记录 |
-| `generation_completed` | ← 客户端 | AI 回复完成 |
-| `generation_error` | ← 客户端 | 生成失败 |
-| `stop_generation` | → 服务端 | 打断生成 |
 | `content_reset` | ← 客户端 | 工具调用完成、开启下一轮答案前清空引导性正文 |
-| `join` | → 服务端 | 加入对话房间 |
+| `generation_completed` | ← 客户端 | AI 回复完成 |
+| `generation_stopped` | ← 客户端 | 生成被中断 |
+| `generation_error` | ← 客户端 | 生成失败 |
+| `generation_resume` | ← 客户端 | 断线重连后恢复正在生成的内容 |
+| `index_progress` | ← 客户端 | 代码索引构建进度 |
 | `leave` | → 服务端 | 离开对话房间 |
 | `index_progress` | ← 客户端 | 接收代码索引构建进度 |
 
@@ -638,7 +654,7 @@ pytest tests/ -v -s
 
 ### Introduction
 
-Flask Chat is an AI-powered chat application built with Flask. It supports multi-user authentication, multi-model switching, WebSocket streaming responses, tool calling, context compression with long-term memory, a RAG (Retrieval-Augmented Generation) knowledge base, code repository index management, conversation templates, Agent workflow, voice input, Webhook integration, LangSmith observability, and AI answer verification. Data is stored in PostgreSQL (with the pgvector extension), and the frontend is a vanilla JavaScript single-page application.
+Flask Chat is an AI-powered chat application built with Flask. It supports multi-user authentication, multi-model switching, WebSocket streaming responses, a three-tier tool calling system (built-in tools / Skill plugins / MCP protocol), context compression with long-term memory, a RAG (Retrieval-Augmented Generation) knowledge base, code repository index management, conversation templates, Agent workflow, voice input, multimodal image understanding, Webhook integration, LangSmith observability, and AI answer verification. Data is stored in PostgreSQL (with the pgvector extension), embeddings are generated by a local Ollama model, and the frontend is a vanilla JavaScript single-page application.
 
 ### Features
 
@@ -649,36 +665,45 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Webhook Integration** — Outbound callbacks (conversation completed) and inbound API (external triggers)
 - **Multi-Model Support** — Configure multiple LLMs and switch between them; compatible with any OpenAI-protocol service (including Ollama local models)
 - **WebSocket Streaming** — Real-time bidirectional communication via Flask-SocketIO + eventlet, token-by-token streaming
-- **Tool Calling** — Function Calling with built-in tools: time, math, code execution, knowledge-base search, code search with user-level isolation
-- **RAG Knowledge Base** — Upload documents, AI auto-searches knowledge base; supports BM25 + vector hybrid search, multi-query rewriting, result reranking
-- **Code Index Management** — Manage code repositories via Web UI, full and incremental indexing with WebSocket real-time progress, cross-repository search with user isolation
+- **Generation Interruption** — Cooperative cancellation via flag checks at three points (per round / per token / per tool call); background tasks survive client disconnect, with resume-on-reconnect
+- **Tool Calling** — Three-tier unified dispatch: built-in tools, Skill plugins (hot-reloadable Python modules with namespace isolation), and MCP protocol (stdio/SSE external servers with automatic tool discovery)
+- **Tool Reliability** — 30s per-execution timeout (`ThreadPoolExecutor`), circuit breaker after 5 consecutive failures (60s cooldown)
+- **MCP Server Management UI** — Inspect connection status and tool lists in the sidebar; add / reconnect / remove servers at runtime without editing config files
+- **Message Queueing** — Keep sending messages while the AI is replying; queued messages appear as cards above the input box with edit (recall into input) and cancel actions, and are dispatched automatically in order
+- **Message Edit & Delete** — Hover a user message to edit (regenerates the AI reply) or delete (removes that message and everything after it)
+- **Multimodal Image Understanding** — Upload via button, Ctrl+V paste, or drag-and-drop; thumbnails render in chat bubbles with click-to-enlarge
+- **RAG Knowledge Base** — Upload documents, AI auto-searches the knowledge base; hybrid retrieval (pgvector cosine recall + BM25 reranking with cached inverted index), optional multi-query rewriting and LLM reranking
+- **Code Index Management** — Manage code repositories via Web UI; full and incremental indexing (SHA256 content-hash diffing detects added/modified/deleted files) with WebSocket real-time progress and task cancellation
 - **Local Model Support** — Run both LLM and Embedding models locally via Ollama
-- **Multi-turn Memory & Context Compression** — Structured summarization + long-term memory across turns
+- **Multi-turn Memory & Context Compression** — Three-tier memory (recent messages / structured summary / long-term memory JSON); automatic compression when the context exceeds 70% of the budget, with secondary compression to keep the summary itself from growing unbounded
+- **Usage Analytics Dashboard** — Token usage panel with day/week/month/all range switching, showing input/output tokens, cache hit rate (visualized), estimated cost, message count, and a 7-day trend chart
 - **Result Verification** — Optional toggle that runs a second agent to validate AI answers
 - **Response Cache** — Dual-mode caching: in-memory (development) or Redis (production)
-- **Error Recovery** — Automatic retry with exponential backoff, fallback to a backup model
+- **Error Recovery** — Automatic retry with exponential backoff, fallback to a backup model, startup state self-healing, health check endpoint
 - **Docker Containerization** — Dockerfile and docker-compose.yml for one-command deployment
-- **Security** — JWT auth, API key auth, Prompt Injection filtering, audit logging, user-level data isolation
+- **Security** — JWT auth, API key auth, Prompt Injection filtering, path whitelisting, secret sanitization before indexing, audit logging, user-level data isolation
 
 ### Tech Stack
 
 | Component | Technology |
 |-----------|------------|
-| Backend | Flask |
+| Backend | Flask 3.1 (application factory + Blueprints) |
 | Real-time | Flask-SocketIO + eventlet (WebSocket) |
-| ORM | Flask-SQLAlchemy |
+| ORM | Flask-SQLAlchemy (hand-written SQL migrations) |
 | Database | PostgreSQL + pgvector |
-| Auth | PyJWT (JWT Token) |
-| Cache | In-memory / Redis (dual-mode, switchable) |
-| LLM Interface | OpenAI SDK (compatible with any OpenAI-protocol service) |
-| Embedding Model | Ollama (qwen3-embedding:8b) or third-party embedding service |
-| Vector Search | pgvector (cosine similarity + BM25 hybrid search) |
-| Code Index Builder | LlamaIndex + CodeSplitter (tree-sitter) + PGVectorStore |
+| Auth | PyJWT (JWT token; WebSocket is JWT-authenticated too) |
+| Cache / Rate limit | In-memory / Redis (dual-mode, switchable) |
+| LLM Interface | OpenAI SDK (any OpenAI-protocol service; currently a Volcengine gateway) |
+| Embedding Model | Ollama (qwen3-embedding:8b, 4096-dim) or third-party embedding service |
+| Vector Search | pgvector (cosine recall + BM25 reranking) |
+| RAG / Code Index | LlamaIndex + CodeSplitter (tree-sitter) + PGVectorStore |
 | File Parsing | pypdf, python-docx |
+| Tool Extension | MCP SDK (stdio/SSE) + in-house Skill plugins (importlib hot-reload) |
 | Observability | LangSmith (`@traceable` decorator + env vars) |
-| Security | JWT auth, API key auth, Prompt Injection filtering, user-level isolation |
+| Security | JWT auth, API key auth, Prompt Injection filtering, path whitelisting, secret sanitization, user-level isolation |
+| Reliability | Tool timeout (ThreadPoolExecutor) + circuit breaker, model retry & fallback, startup self-healing |
 | Containerization | Docker + docker-compose |
-| Frontend | Vanilla HTML / CSS / JavaScript (IIFE + marked.js) |
+| Frontend | Vanilla HTML / CSS / JavaScript (IIFE + marked.js, no build step) |
 
 ### Quick Start
 
