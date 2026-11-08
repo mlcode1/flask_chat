@@ -400,8 +400,17 @@ def _record_tool_result(name, success):
 
 def _execute_with_timeout(func, timeout=TOOL_TIMEOUT_SECONDS):
     """在独立线程中执行函数，超时返回 None"""
+    from flask import current_app
+    
+    # 捕获当前应用上下文，传递到线程中
+    app_context = current_app._get_current_object().app_context()
+    
+    def wrapped_func():
+        with app_context:
+            return func()
+    
     executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(func)
+    future = executor.submit(wrapped_func)
     try:
         result = future.result(timeout=timeout)
         executor.shutdown(wait=False)
