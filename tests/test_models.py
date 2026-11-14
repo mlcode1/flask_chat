@@ -26,22 +26,35 @@ class TestConversation:
         db.session.add(conv)
         db.session.commit()
         
-        assert conv.title == "New Conversation"
+        assert conv.title == "新对话"
         assert conv.summary == ""
         assert conv.memory == ""
     
-    def test_conversation_to_dict(self, db):
-        """Test conversation serialization"""
+    def test_conversation_to_share_dict(self, db):
+        """Test conversation serialization for sharing.
+
+        注意：Conversation 没有 to_dict()，实际序列化方法是 to_share_dict()。
+        它刻意保留 created_at 为 datetime 对象（而非 ISO 字符串），
+        因为 shared.html 模板会调用 .strftime() 格式化。
+        """
         conv = Conversation(title="Test")
         db.session.add(conv)
         db.session.commit()
+        # 附带一条消息，验证嵌套序列化
+        msg = Message(conversation_id=conv.id, role="user", content="Hi")
+        db.session.add(msg)
+        db.session.commit()
         
-        data = conv.to_dict()
+        data = conv.to_share_dict()
         
         assert data['id'] == conv.id
         assert data['title'] == "Test"
-        assert 'created_at' in data
-        assert 'updated_at' in data
+        # created_at 必须保持 datetime，不能是字符串
+        assert isinstance(data['created_at'], datetime)
+        assert len(data['messages']) == 1
+        assert data['messages'][0]['content'] == "Hi"
+        assert data['messages'][0]['role'] == "user"
+        assert 'image_urls' in data['messages'][0]
 
 
 class TestMessage:

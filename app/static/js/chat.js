@@ -136,6 +136,26 @@
     // 搜索跳转到对话
     function loadConversation(convId) {
         if (!convId) return;
+        
+        // 切换对话时清空队列，防止旧队列消息串台到新对话
+        if (messageQueue.length > 0) {
+            console.log(`切换对话 ${currentConvId} -> ${convId}，清空 ${messageQueue.length} 条排队消息`);
+            messageQueue = [];
+            renderQueueMessages();
+        }
+        
+        // 重置流式状态，防止用户在对话 B 发消息时被误排队
+        if (isStreaming) {
+            isStreaming = false;
+            sendBtn.disabled = false;
+            interruptBtn.style.display = "none";
+            currentMessageId = null;
+            currentBubble = null;
+            currentRow = null;
+            fullContent = "";
+            toolCalls = [];
+        }
+        
         currentConvId = convId;
         // 切换侧边栏高亮
         document.querySelectorAll(".conversation-item").forEach(el => el.classList.remove("active"));

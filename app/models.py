@@ -56,7 +56,21 @@ class Conversation(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    messages = db.relationship("Message", backref="conversation", lazy="dynamic", order_by="Message.created_at")
+    # cascade 必须显式声明：Message.conversation_id 为 nullable=False，
+    # 缺少 cascade 时 SQLAlchemy 默认在删除父记录时把子表外键置 NULL，
+    # 会触发 NotNullViolation。（此前被 delete_conversation 路由里的手动
+    # 清理掩盖，属于潜伏 bug）
+    messages = db.relationship(
+        "Message", backref="conversation", lazy="dynamic",
+        order_by="Message.created_at", cascade="all, delete-orphan"
+    )
+
+    # 分享链接同样 nullable=False，cascade 必须定义在这一侧（一对多），
+    # 与 SharedConversation.conversation 通过 back_populates 配对
+    shares = db.relationship(
+        "SharedConversation", back_populates="conversation",
+        cascade="all, delete-orphan"
+    )
 
     def to_share_dict(self):
         """用于分享展示的序列化。
@@ -139,7 +153,9 @@ class SharedConversation(db.Model):
     share_token = db.Column(db.String(64), unique=True, nullable=False, index=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
-    conversation = db.relationship("Conversation", backref="shares")
+    # 注意：cascade 必须定义在一对多的一侧（Conversation.shares），
+    # 不能定义在此处的多对一侧 —— 否则"删除一条分享链接"会连带删掉整个对话。
+    conversation = db.relationship("Conversation", back_populates="shares")
 
 
 class ConversationTemplate(db.Model):

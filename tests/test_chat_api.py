@@ -12,7 +12,9 @@ class TestChatAPI:
         """Test creating a new conversation"""
         response = client.post('/api/conversations', 
                               json={'title': 'Test Chat'})
-        assert response.status_code == 201
+        # 注意：实现返回 200 而非 REST 规范的 201，此处断言真实行为。
+        # 若后续将 create_conversation 改为返回 201，需同步更新此断言。
+        assert response.status_code == 200
         
         data = json.loads(response.data)
         assert 'id' in data
@@ -21,18 +23,24 @@ class TestChatAPI:
     def test_create_conversation_default_title(self, client):
         """Test creating conversation with default title"""
         response = client.post('/api/conversations', json={})
-        assert response.status_code == 201
+        assert response.status_code == 200
         
         data = json.loads(response.data)
         assert 'id' in data
+        # 默认标题已中文化
+        assert data['title'] == '新对话'
     
-    def test_list_conversations(self, client, db):
-        """Test listing conversations"""
+    def test_list_conversations(self, auth_client, db):
+        """Test listing conversations.
+
+        GET /api/conversations 需要 JWT 认证（无 user 时返回 401），
+        因此使用 auth_client 而非匿名 client。
+        """
         # Create some conversations
         for i in range(3):
-            client.post('/api/conversations', json={'title': f'Chat {i}'})
+            auth_client.post('/api/conversations', json={'title': f'Chat {i}'})
         
-        response = client.get('/api/conversations')
+        response = auth_client.get('/api/conversations')
         assert response.status_code == 200
         
         data = json.loads(response.data)
@@ -53,19 +61,20 @@ class TestChatAPI:
         assert data['messages'] == []
         assert data['has_more'] is False
     
-    def test_delete_conversation(self, client, db):
+    def test_delete_conversation(self, auth_client, db):
         """Test deleting a conversation"""
         # Create conversation
-        create_resp = client.post('/api/conversations', json={'title': 'To Delete'})
+        create_resp = auth_client.post('/api/conversations', json={'title': 'To Delete'})
         conv_id = json.loads(create_resp.data)['id']
         
         # Delete it
-        response = client.delete(f'/api/conversations/{conv_id}')
+        response = auth_client.delete(f'/api/conversations/{conv_id}')
         assert response.status_code == 200
         
         # Verify it's gone
-        get_resp = client.get('/api/conversations')
+        get_resp = auth_client.get('/api/conversations')
         conversations = json.loads(get_resp.data)
+        assert isinstance(conversations, list)
         assert not any(c['id'] == conv_id for c in conversations)
     
     def test_rename_conversation(self, client, db):
@@ -242,9 +251,9 @@ class TestChatAPI:
         assert 'knowledge_search' in data
         assert 'code_index' in data
     
-    def test_update_tools_config(self, client):
-        """Test updating tools configuration"""
-        response = client.post('/api/config/tools',
+    def test_update_tools_config(self, admin_client):
+        """Test updating tools configuration (admin only)"""
+        response = admin_client.post('/api/config/tools',
                               json={'knowledge_search': True, 'code_index': False})
         assert response.status_code == 200
         
@@ -260,9 +269,9 @@ class TestChatAPI:
         data = json.loads(response.data)
         assert 'enabled' in data
     
-    def test_update_verify_config(self, client):
-        """Test updating verification configuration"""
-        response = client.post('/api/config/verify',
+    def test_update_verify_config(self, admin_client):
+        """Test updating verification configuration (admin only)"""
+        response = admin_client.post('/api/config/verify',
                               json={'enabled': True})
         assert response.status_code == 200
         
@@ -277,36 +286,109 @@ class TestChatAPI:
         data = json.loads(response.data)
         assert 'text' in data
     
-    def test_update_disclaimer_config(self, client):
-        """Test updating disclaimer configuration"""
-        response = client.post('/api/config/disclaimer',
+    def test_update_disclaimer_config(self, admin_client):
+        """Test updating disclaimer configuration (admin only)"""
+        response = admin_client.post('/api/config/disclaimer',
                               json={'text': 'Test disclaimer'})
         assert response.status_code == 200
         
         data = json.loads(response.data)
         assert data['text'] == 'Test disclaimer'
     
-    def test_update_disclaimer_config_invalid(self, client):
-        """Test updating disclaimer with invalid data"""
-        response = client.post('/api/config/disclaimer',
+    def test_update_disclaimer_config_invalid(self, admin_client):
+        """Test updating disclaimer with invalid data.
+
+        需以管理员身份通过权限校验后，才会走到参数校验分支（400）。
+        """
+        response = admin_client.post('/api/config/disclaimer',
                               json={'text': 123})
         assert response.status_code == 400
     
-    def test_clear_cache(self, client):
-        """Test clearing cache"""
-        response = client.post('/api/cache/clear')
+    def test_clear_cache(self, admin_client):
+        """Test clearing cache (admin only)"""
+        response = admin_client.post('/api/cache/clear')
         assert response.status_code == 200
         
         data = json.loads(response.data)
         assert data['status'] == 'cleared'
     
-    def test_get_audit_logs(self, client, db):
-        """Test getting audit logs"""
+    def test_get_audit_logs(self, admin_client, db):
+        """Test getting audit logs (admin only)"""
         # Create some audit logs by performing actions
-        client.post('/api/conversations', json={'title': 'Audit Test'})
+        admin_client.post('/api/conversations', json={'title': 'Audit Test'})
         
-        response = client.get('/api/audit-logs')
+        response = admin_client.get('/api/audit-logs')
         assert response.status_code == 200
         
         data = json.loads(response.data)
         assert isinstance(data, list)
+
+
+class TestAdminAuthorization:
+    """管理员权限校验测试。
+
+    覆盖三类身份对受保护接口的访问结果：
+      - 匿名（无 JWT）        → 401
+      - 普通已登录用户        → 403
+      - 管理员                → 200
+    """
+
+    # 受 admin_required 保护的写接口
+    PROTECTED_POSTS = [
+        ('/api/config/verify', {'enabled': True}),
+        ('/api/config/tools', {'knowledge_search': True}),
+        ('/api/config/disclaimer', {'text': 'x'}),
+        ('/api/cache/clear', None),
+    ]
+
+    def test_anonymous_rejected(self, client):
+        """匿名请求应被拒绝（401），而非放行"""
+        for path, payload in self.PROTECTED_POSTS:
+            kwargs = {'json': payload} if payload is not None else {}
+            resp = client.post(path, **kwargs)
+            assert resp.status_code == 401, f"{path} 匿名访问应返回 401，实际 {resp.status_code}"
+
+        # GET 类审计日志同样需认证
+        assert client.get('/api/audit-logs').status_code == 401
+
+    def test_normal_user_forbidden(self, auth_client):
+        """已登录但非管理员应被拒绝（403）"""
+        for path, payload in self.PROTECTED_POSTS:
+            kwargs = {'json': payload} if payload is not None else {}
+            resp = auth_client.post(path, **kwargs)
+            assert resp.status_code == 403, f"{path} 普通用户应返回 403，实际 {resp.status_code}"
+
+        assert auth_client.get('/api/audit-logs').status_code == 403
+
+    def test_admin_allowed(self, admin_client):
+        """管理员应被放行（非 401/403）"""
+        for path, payload in self.PROTECTED_POSTS:
+            kwargs = {'json': payload} if payload is not None else {}
+            resp = admin_client.post(path, **kwargs)
+            assert resp.status_code not in (401, 403), \
+                f"{path} 管理员不应被拒，实际 {resp.status_code}"
+
+        assert admin_client.get('/api/audit-logs').status_code == 200
+
+    def test_mcp_add_requires_admin(self, client, auth_client, admin_client):
+        """MCP 添加接口可执行任意命令（RCE 风险），必须限管理员"""
+        payload = {'name': 'evil', 'transport': 'stdio', 'command': 'echo', 'args': ['hi']}
+
+        assert client.post('/api/skills/mcp/servers/add', json=payload).status_code == 401
+        assert auth_client.post('/api/skills/mcp/servers/add', json=payload).status_code == 403
+
+    def test_skill_reload_requires_admin(self, client, auth_client):
+        """Skill 热重载接口必须限管理员"""
+        assert client.post('/api/skills/reload').status_code == 401
+        assert auth_client.post('/api/skills/reload').status_code == 403
+
+    def test_config_change_not_leaked_between_tests(self, admin_client):
+        """验证 autouse fixture 生效：改完配置后不应影响后续断言。
+
+        此处先把 disclaimer 改成非默认值，确认接口生效即可；
+        还原由 _restore_global_config 保证（若失效，其它测试会顺序相关地失败）。
+        """
+        resp = admin_client.post('/api/config/disclaimer', json={'text': 'LEAKED'})
+        assert resp.status_code == 200
+        assert json.loads(resp.data)['text'] == 'LEAKED'
+

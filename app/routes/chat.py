@@ -19,7 +19,7 @@ from app.services.verifier_service import VerifierService
 from app.services.security_service import (
     require_api_key, filter_input, log_audit
 )
-from app.services.auth_service import get_current_user, login_required
+from app.services.auth_service import get_current_user, login_required, admin_required
 from app.middleware import get_disclaimer
 from app.services import cache_service as cache_service_module
 from app.services.cache_service import hash_context
@@ -102,11 +102,18 @@ def get_verify_config():
 
 
 @chat_bp.route("/api/config/verify", methods=["POST"])
+@admin_required
 def update_verify_config():
+    """修改验证开关。
+
+    注意：改的是 current_app.config（进程级全局配置），影响所有用户，
+    故限管理员。此前该接口无任何认证，匿名请求即可改全站行为。
+    """
     data = request.get_json()
     enabled = data.get("enabled")
     if enabled is not None:
         current_app.config["VERIFY_ENABLED"] = bool(enabled)
+    log_audit("config_update", detail=f"VERIFY_ENABLED={current_app.config['VERIFY_ENABLED']}")
     return jsonify({
         "enabled": current_app.config["VERIFY_ENABLED"],
         "model": current_app.config.get("VERIFY_MODEL", ""),
@@ -122,12 +129,21 @@ def get_tools_config():
 
 
 @chat_bp.route("/api/config/tools", methods=["POST"])
+@admin_required
 def update_tools_config():
+    """修改工具开关（知识库检索 / 代码库检索）。
+
+    影响进程级全局配置，对所有用户生效，故限管理员。
+    """
     data = request.get_json()
     if "knowledge_search" in data:
         current_app.config["KNOWLEDGE_SEARCH_ENABLED"] = bool(data["knowledge_search"])
     if "code_index" in data:
         current_app.config["CODE_INDEX_ENABLED"] = bool(data["code_index"])
+    log_audit("config_update", detail=(
+        f"KNOWLEDGE_SEARCH_ENABLED={current_app.config.get('KNOWLEDGE_SEARCH_ENABLED')}, "
+        f"CODE_INDEX_ENABLED={current_app.config.get('CODE_INDEX_ENABLED')}"
+    ))
     return jsonify({
         "knowledge_search": current_app.config.get("KNOWLEDGE_SEARCH_ENABLED", False),
         "code_index": current_app.config.get("CODE_INDEX_ENABLED", False),
@@ -140,13 +156,19 @@ def get_disclaimer_config():
 
 
 @chat_bp.route("/api/config/disclaimer", methods=["POST"])
+@admin_required
 def update_disclaimer_config():
+    """修改 AI 免责声明文本。
+
+    影响进程级全局配置，且文本会拼进所有用户的 AI 回复，故限管理员。
+    """
     data = request.get_json() or {}
     text = data.get("text", "")
     if not isinstance(text, str):
         raise BadRequestError("text 必须是字符串")
     decoded = text.strip()
     current_app.config["AI_DISCLAIMER_TEXT"] = decoded
+    log_audit("config_update", detail=f"AI_DISCLAIMER_TEXT updated (len={len(decoded)})")
     return jsonify({"text": decoded})
 
 
@@ -183,10 +205,12 @@ def health_check():
 
 @chat_bp.route("/api/cache/clear", methods=["POST"])
 @require_api_key
+@admin_required
 def clear_cache():
-    """清空缓存"""
+    """清空缓存（影响全站所有用户，限管理员）"""
     if cache_service_module.cache_service:
         cache_service_module.cache_service.clear()
+        log_audit("cache_clear", detail="全局响应缓存已清空")
         return jsonify({"status": "cleared", "message": "缓存已清空"})
     return jsonify({"status": "error", "message": "缓存服务未初始化"}), 500
 
@@ -723,8 +747,13 @@ def export_conversation(cid):
 
 @chat_bp.route("/api/audit-logs")
 @require_api_key
-def get_audit_logs():
-    """获取审计日志"""
+@admin_required
+def get_audit_logs_api():
+    """获取审计日志。
+
+    含全站用户操作记录（create_conversation / upload / share / auth_failed 等），
+    属于跨用户敏感数据，限管理员。
+    """
     from app.services.security_service import get_audit_logs
     limit = request.args.get("limit", 100, type=int)
     action = request.args.get("action")

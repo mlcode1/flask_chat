@@ -33,9 +33,21 @@ logger = logging.getLogger(__name__)
 socketio = SocketIO()
 
 
-def create_app():
+def create_app(config_override=None):
+    """创建 Flask 应用。
+
+    Args:
+        config_override: 可选的配置类（如 TestingConfig）。
+            必须在 db.init_app() 之前注入 —— SQLAlchemy 的 engine 在
+            init_app 时即根据 SQLALCHEMY_DATABASE_URI 绑定，之后再修改
+            app.config 不会重建 engine，会导致配置覆盖失效。
+    """
     app = Flask(__name__, template_folder="../app/templates", static_folder="../app/static")
     app.config.from_object(Config)
+
+    # 关键：在 db.init_app 之前覆盖配置，否则 engine 已绑定默认库
+    if config_override is not None:
+        app.config.from_object(config_override)
 
     CORS(app)
     db.init_app(app)

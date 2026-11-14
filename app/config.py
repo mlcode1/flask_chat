@@ -117,3 +117,54 @@ class Config:
     # Logging (结构化日志)
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FORMAT = os.getenv("LOG_FORMAT", "human")  # 'human' or 'json'
+
+
+def _build_testing_database_uri():
+    """构建测试库连接串。
+
+    ⚠️ 必须是 PostgreSQL，不能用 SQLite：
+    models.DocumentChunk.embedding 使用 pgvector 的 Vector(4096) 类型，
+    SQLite 无法创建该列，会导致 create_all() 失败。
+
+    测试库名由 TEST_DATABASE_URL 指定；未指定时在生产库名后加 `_test` 后缀，
+    并强制校验测试库名必须不同于生产库名，避免误删生产数据。
+    """
+    explicit = os.getenv("TEST_DATABASE_URL", "").strip()
+    if explicit:
+        return explicit
+
+    prod_uri = os.getenv("DATABASE_URL", "")
+    if not prod_uri:
+        # 没有任何生产库配置时，退回一个明确的测试库名
+        return "postgresql+psycopg://postgres:postgres@localhost:5432/flask_chat_test"
+
+    # 把库名替换成 <原名>_test
+    head, sep, dbname = prod_uri.rpartition("/")
+    if not sep or not dbname:
+        return f"{prod_uri}_test"
+
+    # 剥离查询参数（如 ?sslmode=require）
+    dbname_part, qmark, query = dbname.partition("?")
+    test_dbname = f"{dbname_part}_test"
+    return f"{head}/{test_dbname}" + (f"{qmark}{query}" if qmark else "")
+
+
+class TestingConfig(Config):
+    """测试环境配置。
+
+    继承 Config 以复用全部业务配置，仅覆盖数据库连接与调试开关。
+    """
+
+    TESTING = True
+    DEBUG = False
+    SQLALCHEMY_DATABASE_URI = _build_testing_database_uri()
+
+    # 测试环境禁用会产生外部副作用的功能
+    MCP_ENABLED = False          # 避免测试时拉起 uvx/npx 子进程
+    SKILLS_ENABLED = False       # 避免加载本地插件
+    CACHE_ENABLED = False        # 避免缓存干扰断言
+
+    # 生产库名，供 conftest 做最后一道保险校验
+    PRODUCTION_DATABASE_NAME = (
+        os.getenv("DATABASE_URL", "").rpartition("/")[2].partition("?")[0]
+    )

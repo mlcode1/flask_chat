@@ -1,8 +1,15 @@
 """
 Skills 管理 API - 提供 Skill 和 MCP 服务器的管理接口
+
+权限说明：
+- GET 类查询接口：require_api_key（不泄露 command/args/env 等敏感配置）
+- 写操作接口（reload / enable / disable / test / MCP 增删重连）：admin_required
+  其中 add_mcp_server 接受任意 command + args 并 spawn 子进程，等价于远程命令执行，
+  必须限管理员。此前仅靠 require_api_key，而 API_KEY 未配置时该装饰器直接放行。
 """
 from flask import Blueprint, jsonify, request
 from app.services.security_service import require_api_key
+from app.services.auth_service import admin_required
 from app.services.tool_service import get_skill_loader, get_mcp_manager
 
 skills_bp = Blueprint('skills', __name__, url_prefix='/api/skills')
@@ -43,6 +50,7 @@ def get_skill_info(skill_name):
 
 @skills_bp.route('/reload', methods=['POST'])
 @require_api_key
+@admin_required
 def reload_all_skills():
     """重新加载所有 Skills"""
     loader = get_skill_loader()
@@ -65,6 +73,7 @@ def reload_all_skills():
 
 @skills_bp.route('/<skill_name>/reload', methods=['POST'])
 @require_api_key
+@admin_required
 def reload_skill(skill_name):
     """重新加载指定的 Skill"""
     loader = get_skill_loader()
@@ -97,6 +106,7 @@ def reload_skill(skill_name):
 
 @skills_bp.route('/<skill_name>/enable', methods=['POST'])
 @require_api_key
+@admin_required
 def enable_skill(skill_name):
     """启用指定的 Skill"""
     loader = get_skill_loader()
@@ -130,6 +140,7 @@ def enable_skill(skill_name):
 
 @skills_bp.route('/<skill_name>/disable', methods=['POST'])
 @require_api_key
+@admin_required
 def disable_skill(skill_name):
     """禁用指定的 Skill"""
     loader = get_skill_loader()
@@ -157,8 +168,9 @@ def disable_skill(skill_name):
 
 @skills_bp.route('/<skill_name>/test', methods=['POST'])
 @require_api_key
+@admin_required
 def test_skill_tool(skill_name):
-    """测试 Skill 中的工具"""
+    """测试 Skill 中的工具（可执行任意已注册 Skill 的逻辑，限管理员）"""
     data = request.get_json() or {}
     tool_name = data.get('tool_name')
     arguments = data.get('arguments', {})
@@ -236,8 +248,14 @@ def get_mcp_server_info(server_name):
 
 @skills_bp.route('/mcp/servers/add', methods=['POST'])
 @require_api_key
+@admin_required
 def add_mcp_server():
-    """添加并连接 MCP 服务器"""
+    """添加并连接 MCP 服务器。
+
+    ⚠️ 安全：本接口接受任意 command + args + env 并 spawn 子进程，
+    等价于远程命令执行（RCE），必须限管理员。
+    此前仅有 require_api_key，而 API_KEY 未配置时该装饰器直接放行。
+    """
     data = request.get_json() or {}
     
     server_name = data.get('name')
@@ -297,8 +315,9 @@ def add_mcp_server():
 
 @skills_bp.route('/mcp/servers/<server_name>/remove', methods=['POST'])
 @require_api_key
+@admin_required
 def remove_mcp_server(server_name):
-    """移除 MCP 服务器"""
+    """移除 MCP 服务器（会终止其子进程，影响全站工具可用性，限管理员）"""
     manager = get_mcp_manager()
     
     if manager is None:
@@ -330,8 +349,9 @@ def remove_mcp_server(server_name):
 
 @skills_bp.route('/mcp/servers/<server_name>/reconnect', methods=['POST'])
 @require_api_key
+@admin_required
 def reconnect_mcp_server(server_name):
-    """重新连接 MCP 服务器"""
+    """重新连接 MCP 服务器（会重启子进程，限管理员）"""
     manager = get_mcp_manager()
     
     if manager is None:
