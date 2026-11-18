@@ -37,9 +37,21 @@ def register_handlers(socketio, app):
         if user:
             logger.info(f"WebSocket 客户端已连接: {request.sid}, user: {user.username}")
             # 存储用户信息
+            # ⚠️ 必须在启动后台任务前把 user_id 取成局部变量：
+            #    后台 greenlet 里没有 request 上下文，访问 request.sid 会报错。
+            user_id = user.id
+            username = user.username
             with app.app_context():
-                _connected_users[request.sid] = user.id
-            emit('connected', {'status': 'connected', 'sid': request.sid, 'user': user.username})
+                _connected_users[request.sid] = user_id
+
+            # 先回 connected，让用户立刻能开始聊天，不等 MCP 连接
+            emit('connected', {'status': 'connected', 'sid': request.sid, 'user': username})
+
+            # 懒连接该用户定制的 MCP 服务器（重启后恢复）。
+            # 必须放后台任务：ensure_connected_sync 是阻塞调用，
+            # 单个服务器最长等 30s，放在握手路径上会让用户干等。
+            if current_app.config.get('MCP_ENABLED', False):
+                socketio.start_background_task(_load_user_mcp_servers, app, user_id, username)
         else:
             logger.info(f"WebSocket 客户端已连接: {request.sid} (匿名)")
             emit('connected', {'status': 'connected', 'sid': request.sid})
@@ -204,6 +216,34 @@ def register_handlers(socketio, app):
             gen_info = _active_generations[msg_id]
             gen_info['stop_event'].set()
             logger.info(f"已请求停止生成: message_id={msg_id}")
+
+
+def _load_user_mcp_servers(app, user_id, username):
+    """后台任务：懒连接该用户定制的 MCP 服务器。
+
+    为什么需要：用户定制服务器不在启动时连接（否则要为每个用户 spawn 子进程，
+    启动时间与内存不可控）。进程重启后，它们的配置虽在数据库里，
+    但不会自动重连，工具也就不会出现在模型的工具列表中。
+    因此在用户上线时补连一次。
+
+    ⚠️ 运行在独立 greenlet，必须自建 app_context；
+       且异常必须吞掉 —— 后台任务抛错会污染日志且无人处理。
+    """
+    try:
+        with app.app_context():
+            if not current_app.config.get('MCP_ENABLED', False):
+                return
+            from app.services import mcp_service
+            results = mcp_service.ensure_user_servers_connected(user_id)
+            if results:
+                ok = [n for n, v in results.items() if v]
+                failed = [n for n, v in results.items() if not v]
+                logger.info(
+                    f"用户 {username}(id={user_id}) 上线懒连接 MCP: "
+                    f"成功 {ok or '无'}" + (f", 失败 {failed}" if failed else "")
+                )
+    except Exception as e:
+        logger.warning(f"用户 {username}(id={user_id}) 的 MCP 懒连接失败: {e}")
 
 
 def generate_ai_response(app, conv_id, msg_id, user_content, model, image_urls, room, stop_event, user_id=None):

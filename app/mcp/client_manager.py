@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import threading
-from typing import Dict, List, Optional, Any, Awaitable, Callable
+from typing import Dict, List, Optional, Any, Awaitable, Callable, Iterable
 
 # 延迟导入 mcp 库，避免未安装时导致启动失败
 try:
@@ -302,6 +302,37 @@ class MCPClientManager:
             return True
         return False
 
+    def ensure_connected_sync(self, name: str, server_config: Dict[str, Any]) -> bool:
+        """确保指定服务器已连接；未连接则按给定配置连接。
+
+        用于用户定制服务器的按需拉起 —— 不在启动时全量连接，
+        避免为每个用户的每个 stdio 服务器都常驻一个子进程。
+
+        Returns:
+            True 表示调用返回后该服务器处于已连接状态。
+        """
+        existing = self.servers.get(name)
+        if existing is not None and existing.is_connected:
+            return True
+
+        # 已存在但断线：先摘掉旧连接对象，再重连
+        if existing is not None:
+            logger.info(f"MCP server {name} 已存在但未连接，重新连接")
+            try:
+                # run_sync 需要协程工厂（callable），不是协程对象
+                self.run_sync(lambda: self._remove_async(name))
+            except Exception as e:
+                logger.warning(f"清理旧连接失败: {e}")
+
+        self._ensure_loop()
+        return self.run_sync(lambda: self._add_server_async(name, server_config))
+
+    async def _remove_async(self, name: str) -> bool:
+        conn = self.servers.pop(name, None)
+        if conn:
+            await conn.disconnect()
+        return True
+
     def remove_server_sync(self, name: str) -> bool:
         """同步移除指定服务器"""
         if name not in self.servers:
@@ -354,18 +385,36 @@ class MCPClientManager:
 
     # ===== 查询接口（同步，不涉及异步） =====
 
-    def get_all_tools(self) -> List[Dict[str, Any]]:
+    def get_all_tools(self, allowed_servers: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+        """返回可用工具列表。
+
+        Args:
+            allowed_servers: 白名单服务器名集合。None 表示不过滤（返回全部已连接服务器的工具）。
+                ⚠️ 多用户场景下必须传白名单 —— manager.servers 以 name 为全局键、
+                不含归属信息，不过滤会把用户 A 的定制服务器工具暴露给用户 B。
+        """
+        allowed = set(allowed_servers) if allowed_servers is not None else None
+
         all_tools = []
-        for server in self.servers.values():
-            if server.is_connected:
-                all_tools.extend(server.tools)
+        for name, server in self.servers.items():
+            if not server.is_connected:
+                continue
+            if allowed is not None and name not in allowed:
+                continue
+            all_tools.extend(server.tools)
         return all_tools
 
-    def list_servers(self) -> List[Dict[str, Any]]:
-        """列出所有已配置的 MCP 服务器信息"""
+    def list_servers(self, allowed_servers: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+        """列出已配置的 MCP 服务器信息。
+
+        Args:
+            allowed_servers: 白名单。None 表示返回全部（仅管理员场景使用）。
+        """
+        allowed = set(allowed_servers) if allowed_servers is not None else None
         return [
             self.get_server_info(name)
             for name in self.servers
+            if allowed is None or name in allowed
         ]
 
     def get_connected_servers(self) -> List[str]:

@@ -145,20 +145,42 @@ def create_app(config_override=None):
         # 初始化 MCP 客户端（使用持久后台事件循环线程，不创建一次性循环）
         if app.config.get('MCP_ENABLED', False):
             try:
-                mcp_servers_config = app.config.get('MCP_SERVERS_CONFIG', {})
-                if mcp_servers_config:
+                from app.services import mcp_service
+
+                # 合并 .env 配置与数据库配置（数据库优先）。
+                # .env 中的服务器会同步一份入库（source='env'），
+                # 以便在管理界面统一查看与启停。
+                effective = mcp_service.build_effective_configs(
+                    app.config.get('MCP_SERVERS_CONFIG', {})
+                )
+
+                if effective:
                     mcp_manager = get_mcp_manager()
-                    results = mcp_manager.connect_all_sync(mcp_servers_config)
+                    results = mcp_manager.connect_all_sync(effective)
                     connected = mcp_manager.get_connected_servers()
                     failed = [n for n, ok in results.items() if not ok]
+
+                    # 回写运行时状态，供管理界面展示
+                    for name, ok in results.items():
+                        tools_count = (
+                            len(mcp_manager.servers[name].tools)
+                            if ok and name in mcp_manager.servers else 0
+                        )
+                        mcp_service.update_runtime_state(
+                            name,
+                            status='connected' if ok else 'failed',
+                            tools_count=tools_count,
+                            error_message=None if ok else '启动时连接失败，可在界面点「重连」'
+                        )
+
                     if failed:
                         print(f"⚠️ MCP 部分服务器连接失败: {failed}")
                     if connected:
                         print(f"✅ MCP 系统已初始化，连接了 {len(connected)} 个服务器: {connected}")
                     else:
-                        print("⚠️ MCP 已启用但所有服务器均连接失败")
+                        print("⚠️ MCP 已启用但所有服务器均连接失败（配置已保留，可稍后重连）")
                 else:
-                    print("ℹ️ MCP 已启用但未配置服务器")
+                    print("ℹ️ MCP 已启用但无启用的服务器配置")
             except Exception as e:
                 print(f"⚠️ MCP 系统初始化失败: {e}")
                 logger.error(f"Failed to initialize MCP system: {e}", exc_info=True)

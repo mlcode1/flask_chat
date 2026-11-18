@@ -20,7 +20,7 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用�
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
 - **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、知识库检索、代码库检索等工具；支持 Skill 插件系统（本地 Python 插件，热加载，命名空间隔离）和 MCP 协议集成（通过 stdio/SSE 连接外部工具服务器，自动发现工具并注册）
 - **工具可靠性保障** — 单次执行 30 秒超时控制（`ThreadPoolExecutor`），连续失败 5 次自动熔断 60 秒，工具调用轮次上限 10 轮（达上限后撤掉工具强制模型总结作答），防止异常工具拖垮系统或陷入死循环
-- **MCP 服务器管理 UI** — 侧边栏可视化查看连接状态与工具列表，支持运行时添加、重连、移除，无需改配置文件
+- **MCP 服务器管理 UI** — 侧边栏可视化查看连接状态与工具列表，支持运行时添加、更新、启用/禁用、重连、移除；配置持久化到数据库（重启自动恢复），支持管理员配置全局服务器或用户定制专属服务器（按用户隔离，仅归属者可见可用）
 - **消息排队** — AI 回复过程中用户可继续输入消息，消息排队等待，队列中的消息可编辑（恢复到输入框）和取消；AI 回复完成后自动发送队列中的下一条消息
 - **消息编辑与删除** — 支持 hover 编辑用户消息（编辑后重新生成 AI 回复）和删除消息（删除该消息及之后的所有消息）
 - **工具调用中断** — 工具执行过程中检测中断信号，执行完当前工具后跳过后续工具调用，避免长时间阻塞
@@ -276,7 +276,8 @@ cp .env.example .env
 | `SKILLS_DIR` | Skill 插件目录 | `skills` |
 | **MCP 配置** | | |
 | `MCP_ENABLED` | 是否启用 MCP 协议集成 | `false` |
-| `MCP_SERVERS_CONFIG` | MCP 服务器配置（JSON 字符串，如 `{"fetch":{"transport":"stdio","command":"uvx","args":["mcp-server-fetch"],"env":{"HTTP_PROXY":"...","HTTPS_PROXY":"..."}}}`） | 空 |
+| `MCP_SERVERS_CONFIG` | MCP 服务器配置（JSON 字符串，如 `{"fetch":{"transport":"stdio","command":"uvx","args":["mcp-server-fetch"],"env":{"HTTP_PROXY":"...","HTTPS_PROXY":"..."}}}`）。启动时同步一份到 `mcp_servers` 表，界面改过则不再被覆盖 | 空 |
+| `MCP_ALLOW_USER_CUSTOM` | 是否允许非管理员用户自助添加 MCP 服务器（仅 sse；stdio 始终限管理员） | `false` |
 
 **5. 数据库初始化**
 
@@ -453,7 +454,7 @@ EMBEDDING_DIM=3072
 - **语音输入** — 点击麦克风按钮开始录音，识别结果自动填入输入框（需浏览器支持 Web Speech API）
 - **知识库管理** — 侧边栏点击「知识库管理」进入独立页面，支持上传文档（`.txt`、`.md`、`.pdf`、`.docx`）、删除文档、查看统计信息
 - **代码库管理** — 侧边栏点击「代码库管理」进入独立页面，支持添加代码仓库、全量/增量构建索引、查看进度、取消任务、搜索测试、删除仓库
-- **MCP 服务器管理** — 侧边栏点击「MCP 服务器」打开管理面板，可查看各服务器连接状态与工具数量，运行时添加（stdio/sse）、重连、移除
+- **MCP 服务器管理** — 侧边栏点击「MCP 服务器」打开管理面板，可查看各服务器连接状态、工具数量、归属范围（全局/我的）与来源（配置文件/界面添加）；支持运行时添加（stdio/sse）、启用禁用、重连、移除。配置持久化在数据库，重启后自动恢复；只有管理员或归属者能看到管理按钮，其他人显示为「只读」
 - **用量统计** — 侧边栏点击「用量统计」打开仪表盘，可切换今天/本周/本月/全部，查看 Token 用量、缓存命中率、预估费用与趋势图
 - **结果验证** — 顶部打开「结果验证」开关后，AI 回答完成后会自动触发验证
 - **分享对话** — 点击顶部「分享」按钮生成公开链接
@@ -609,11 +610,13 @@ pytest tests/ -v -s
 | `POST` | `/api/skills/<name>/enable` | 启用指定 Skill |
 | `POST` | `/api/skills/<name>/disable` | 禁用指定 Skill |
 | `POST` | `/api/skills/<name>/test` | 测试 Skill 中的工具 |
-| `GET` | `/api/skills/mcp/servers` | 列出所有 MCP 服务器 |
-| `GET` | `/api/skills/mcp/servers/<name>/info` | 获取 MCP 服务器信息 |
-| `POST` | `/api/skills/mcp/servers/add` | 添加并连接 MCP 服务器 |
-| `POST` | `/api/skills/mcp/servers/<name>/remove` | 移除 MCP 服务器 |
-| `POST` | `/api/skills/mcp/servers/<name>/reconnect` | 重新连接 MCP 服务器 |
+| `GET` | `/api/skills/mcp/servers` | 列出当前用户可见的 MCP 服务器（含归属、启停状态，env/headers 脱敏） |
+| `GET` | `/api/skills/mcp/servers/<name>/info` | 获取单个服务器详情（`?include_secrets=true` 且为归属者/管理员时返回原值） |
+| `POST` | `/api/skills/mcp/servers/add` | 添加 MCP 服务器并持久化到数据库（stdio 仅管理员，sse 可开放给用户） |
+| `PUT`/`PATCH` | `/api/skills/mcp/servers/<name>` | 更新服务器配置并按新配置重连 |
+| `POST` | `/api/skills/mcp/servers/<name>/toggle` | 启用/禁用（保留配置，仅停止加载其工具） |
+| `POST` | `/api/skills/mcp/servers/<name>/remove` | 移除服务器（断开连接 + 删除数据库配置） |
+| `POST` | `/api/skills/mcp/servers/<name>/reconnect` | 按数据库配置重新连接（进程重启后也可用） |
 
 #### 系统与运维
 
@@ -668,7 +671,7 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Generation Interruption** — Cooperative cancellation via flag checks at three points (per round / per token / per tool call); background tasks survive client disconnect, with resume-on-reconnect
 - **Tool Calling** — Three-tier unified dispatch: built-in tools, Skill plugins (hot-reloadable Python modules with namespace isolation), and MCP protocol (stdio/SSE external servers with automatic tool discovery)
 - **Tool Reliability** — 30s per-execution timeout (`ThreadPoolExecutor`), circuit breaker after 5 consecutive failures (60s cooldown), and a 10-round cap on tool-call loops (tools are withdrawn at the cap so the model must summarize with what it has)
-- **MCP Server Management UI** — Inspect connection status and tool lists in the sidebar; add / reconnect / remove servers at runtime without editing config files
+- **MCP Server Management UI** — Inspect connection status, tool lists, ownership scope (global / mine) and source (config file / UI) in the sidebar; add, update, enable/disable, reconnect and remove servers at runtime. Configs persist in the database and auto-recover after restart; admins can register global servers while users may register their own (isolated per user, visible only to the owner)
 - **Message Queueing** — Keep sending messages while the AI is replying; queued messages appear as cards above the input box with edit (recall into input) and cancel actions, and are dispatched automatically in order
 - **Message Edit & Delete** — Hover a user message to edit (regenerates the AI reply) or delete (removes that message and everything after it)
 - **Multimodal Image Understanding** — Upload via button, Ctrl+V paste, or drag-and-drop; thumbnails render in chat bubbles with click-to-enlarge

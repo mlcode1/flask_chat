@@ -2837,52 +2837,102 @@
             const data = await res.json();
 
             if (!data.servers || data.servers.length === 0) {
-                listDiv.innerHTML = '<div style="color:#888;">暂无已连接的 MCP 服务器</div>';
+                listDiv.innerHTML = '<div style="color:#888;">暂无 MCP 服务器配置</div>';
                 return;
             }
 
-            listDiv.innerHTML = data.servers.map(s => `
+            // 状态：已启用且连接成功 / 已启用但连接失败 / 已禁用
+            // 配置持久化后，"未连接"不再意味着配置丢失，可点重连恢复
+            const stateOf = (s) => {
+                if (s.enabled === false) return { text: '○ 已禁用', color: '#888' };
+                if (s.connected) return { text: '● 已连接', color: '#22c55e' };
+                return { text: '○ 未连接', color: '#ef4444' };
+            };
+
+            listDiv.innerHTML = data.servers.map(s => {
+                const st = stateOf(s);
+                const scope = s.scope === 'global' ? '全局' : '我的';
+                const source = s.source === 'env' ? '配置文件' : '界面添加';
+                // 只有管理员或归属者能管理，否则不渲染按钮（避免点了报 403）
+                const actions = s.can_manage ? `
+                    <div>
+                        <button class="mcp-toggle-btn" data-name="${escapeHtml(s.name)}" data-enabled="${s.enabled === false ? 'true' : 'false'}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;">${s.enabled === false ? '启用' : '禁用'}</button>
+                        <button class="mcp-reconnect-btn" data-name="${escapeHtml(s.name)}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;margin-left:4px;">重连</button>
+                        <button class="mcp-remove-btn" data-name="${escapeHtml(s.name)}" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;margin-left:4px;">移除</button>
+                    </div>` : '<div style="color:#888;font-size:0.8rem;">只读</div>';
+
+                return `
                 <div class="mcp-server-item" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;margin-bottom:6px;">
                     <div>
                         <span style="font-weight:600;">${escapeHtml(s.name)}</span>
-                        <span style="color:${s.connected ? '#22c55e' : '#ef4444'};font-size:0.85rem;margin-left:6px;">${s.connected ? '● 已连接' : '○ 未连接'}</span>
-                        <span style="color:#888;font-size:0.8rem;margin-left:6px;">${s.transport} · ${s.tools_count} 个工具</span>
+                        <span style="color:${st.color};font-size:0.85rem;margin-left:6px;">${st.text}</span>
+                        <span style="color:#888;font-size:0.8rem;margin-left:6px;">${escapeHtml(s.transport || '')} · ${s.tools_count || 0} 个工具 · ${scope} · ${source}</span>
+                        ${s.error_message ? `<div style="color:#ef4444;font-size:0.78rem;margin-top:2px;">${escapeHtml(s.error_message)}</div>` : ''}
                     </div>
-                    <div>
-                        <button class="mcp-reconnect-btn" data-name="${s.name}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;">重连</button>
-                        <button class="mcp-remove-btn" data-name="${s.name}" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;">移除</button>
-                    </div>
-                </div>
-            `).join('');
+                    ${actions}
+                </div>`;
+            }).join('');
+
+            // 统一处理管理操作：这些接口可能返回 403/404/400，
+            // 必须读 data.error 给出准确提示，不能只依赖 catch（网络层不会抛）
+            async function mcpAction(url, method, btn, busyText, okMsg, body) {
+                const original = btn ? btn.textContent : null;
+                if (btn && busyText) { btn.textContent = busyText; btn.disabled = true; }
+                try {
+                    const resp = await authFetch(url, {
+                        method: method,
+                        headers: { 'Content-Type': 'application/json' },
+                        body: body ? JSON.stringify(body) : undefined
+                    });
+                    const result = await resp.json().catch(() => ({}));
+                    if (resp.ok && result.success !== false) {
+                        // 连接失败但配置已保存时后端返回 connected:false，需区别提示
+                        if (result.connected === false) {
+                            showToast(result.message || '配置已保存，但连接失败', 'error');
+                        } else {
+                            showToast(okMsg || result.message || '操作成功', 'success');
+                        }
+                    } else {
+                        showToast(result.error || `操作失败 (HTTP ${resp.status})`, 'error');
+                    }
+                } catch (e) {
+                    showToast('请求失败: ' + e.message, 'error');
+                } finally {
+                    if (btn && original !== null) { btn.textContent = original; btn.disabled = false; }
+                    loadMcpServers();
+                    loadMcpCount();
+                }
+            }
+
+            // 绑定启用/禁用
+            listDiv.querySelectorAll('.mcp-toggle-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const name = btn.dataset.name;
+                    const enable = btn.dataset.enabled === 'true';
+                    // 显式传目标状态，不依赖后端翻转（翻转在并发下易出错）
+                    mcpAction(`/api/skills/mcp/servers/${encodeURIComponent(name)}/toggle`,
+                              'POST', btn, enable ? '启用中...' : '禁用中...',
+                              enable ? `已启用 ${name}` : `已禁用 ${name}`,
+                              { enabled: enable });
+                });
+            });
 
             // 绑定重连
             listDiv.querySelectorAll('.mcp-reconnect-btn').forEach(btn => {
-                btn.addEventListener('click', async () => {
+                btn.addEventListener('click', () => {
                     const name = btn.dataset.name;
-                    btn.textContent = '重连中...';
-                    try {
-                        await authFetch(`/api/skills/mcp/servers/${name}/reconnect`, { method: 'POST' });
-                        loadMcpServers();
-                        loadMcpCount();
-                    } catch (e) {
-                        btn.textContent = '重连';
-                        showToast('重连失败', 'error');
-                    }
+                    mcpAction(`/api/skills/mcp/servers/${encodeURIComponent(name)}/reconnect`,
+                              'POST', btn, '重连中...', `已重连 ${name}`);
                 });
             });
 
             // 绑定移除
             listDiv.querySelectorAll('.mcp-remove-btn').forEach(btn => {
-                btn.addEventListener('click', async () => {
+                btn.addEventListener('click', () => {
                     const name = btn.dataset.name;
-                    if (!confirm(`确定移除 MCP 服务器 "${name}" 吗？`)) return;
-                    try {
-                        await authFetch(`/api/skills/mcp/servers/${name}/remove`, { method: 'POST' });
-                        loadMcpServers();
-                        loadMcpCount();
-                    } catch (e) {
-                        showToast('移除失败', 'error');
-                    }
+                    if (!confirm(`确定移除 MCP 服务器 "${name}" 吗？配置将从数据库删除，重启后不会恢复。`)) return;
+                    mcpAction(`/api/skills/mcp/servers/${encodeURIComponent(name)}/remove`,
+                              'POST', btn, null, `已移除 ${name}`);
                 });
             });
 
@@ -2954,7 +3004,12 @@
                     });
                     const data = await res.json();
                     if (data.success) {
-                        showToast(`MCP 服务器 ${name} 连接成功`, 'success');
+                        if (data.connected === false) {
+                            // 配置已入库但连接失败 —— 不算失败，提示用户可稍后重连
+                            showToast(data.message || '配置已保存，但连接失败，可稍后点「重连」', 'error');
+                        } else {
+                            showToast(`MCP 服务器 ${name} 已添加并连接`, 'success');
+                        }
                         document.getElementById('mcp-name-input').value = '';
                         document.getElementById('mcp-command-input').value = '';
                         document.getElementById('mcp-args-input').value = '';
@@ -2963,10 +3018,10 @@
                         loadMcpServers();
                         loadMcpCount();
                     } else {
-                        showToast(data.error || '连接失败', 'error');
+                        showToast(data.error || `添加失败 (HTTP ${res.status})`, 'error');
                     }
                 } catch (e) {
-                    showToast('连接失败: ' + e.message, 'error');
+                    showToast('添加失败: ' + e.message, 'error');
                 }
                 addBtn.textContent = '添加并连接';
                 addBtn.disabled = false;

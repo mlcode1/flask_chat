@@ -106,17 +106,21 @@ def db(app):
 
 @pytest.fixture(autouse=True)
 def _restore_global_config(app):
-    """恢复被 /api/config/* 接口篡改的进程级配置。
+    """恢复被接口或测试篡改的进程级配置。
 
-    app fixture 是 session 级，而 update_verify_config / update_tools_config /
-    update_disclaimer_config 修改的是 current_app.config（进程级全局），
-    不还原会导致配置修改跨测试泄漏、产生顺序依赖。
+    app fixture 是 session 级，而 /api/config/* 接口改的是 current_app.config
+    （进程级全局），测试里直接写 app.config[...] 同样会跨用例泄漏。
+    不还原会导致配置修改产生测试顺序依赖 —— 例如某个用例把
+    MCP_ALLOW_USER_CUSTOM 置 True 未恢复，后续断言"默认关闭"的用例就会失败。
     """
     watched = (
         "VERIFY_ENABLED",
         "KNOWLEDGE_SEARCH_ENABLED",
         "CODE_INDEX_ENABLED",
         "AI_DISCLAIMER_TEXT",
+        "MCP_ENABLED",
+        "MCP_ALLOW_USER_CUSTOM",
+        "SKILLS_ENABLED",
     )
     with app.app_context():
         snapshot = {k: app.config.get(k) for k in watched}
@@ -136,14 +140,12 @@ def client(app, db):
 
 @pytest.fixture(scope="function")
 def test_user(app, db):
-    """Create a **non-admin** test user and return (user, token).
+    """Create a **non-admin** test user, returning the User object.
 
-    多数 API 走 login_required / get_current_user()，无 JWT 时返回 401，
-    因此需要此 fixture 提供已认证用户。
     is_admin 保持默认 False，用于验证普通用户会被 admin_required 拒绝（403）。
+    需要带 JWT 的请求请用 auth_client fixture。
     """
     from app.models import User
-    from app.services.auth_service import generate_token
 
     with app.app_context():
         user = User(username="testuser", email="test@example.com")
@@ -151,20 +153,18 @@ def test_user(app, db):
         db.session.add(user)
         db.session.commit()
 
-        token = generate_token(user.id)
-        yield user, token
+        yield user
 
         db.session.remove()
 
 
 @pytest.fixture(scope="function")
 def admin_user(app, db):
-    """Create an **admin** test user and return (user, token).
+    """Create an **admin** test user, returning the User object.
 
     用于验证 admin_required 放行的正向路径。
     """
     from app.models import User
-    from app.services.auth_service import generate_token
 
     with app.app_context():
         user = User(
@@ -176,8 +176,7 @@ def admin_user(app, db):
         db.session.add(user)
         db.session.commit()
 
-        token = generate_token(user.id)
-        yield user, token
+        yield user
 
         db.session.remove()
 
@@ -220,7 +219,10 @@ def auth_client(app, db, test_user):
     用法：auth_client.get('/api/conversations')
     访问 admin_required 接口应得 403。
     """
-    user, token = test_user
+    from app.services.auth_service import generate_token
+
+    with app.app_context():
+        token = generate_token(test_user.id)
     yield _make_authed_client(app.test_client(), token)
 
 
@@ -231,8 +233,26 @@ def admin_client(app, db, admin_user):
     用法：admin_client.post('/api/cache/clear')
     访问 admin_required 接口应得 200。
     """
-    user, token = admin_user
+    from app.services.auth_service import generate_token
+
+    with app.app_context():
+        token = generate_token(admin_user.id)
     yield _make_authed_client(app.test_client(), token)
+
+
+@pytest.fixture(autouse=True)
+def _reset_mcp_lazy_state():
+    """清空 MCP 懒连接的进程级簿记。
+
+    mcp_service._users_loaded 是模块级 dict，跨测试存活。
+    不清空的话，前一个测试触发过的冷却期会让后续测试拿到"跳过连接"的空结果，
+    表现为诡异的、依赖执行顺序的失败。
+    """
+    from app.services import mcp_service
+
+    mcp_service.invalidate_user_load(None)   # 清全部
+    yield
+    mcp_service.invalidate_user_load(None)
 
 
 @pytest.fixture
@@ -240,3 +260,103 @@ def temp_dir():
     """Create temporary directory for test files."""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield tmpdir
+
+
+@pytest.fixture(scope="function")
+def mcp_enabled(app, db, monkeypatch):
+    """启用 MCP 并把连接层替换为假实现。
+
+    ⚠️ 必须 mock：本机已安装 mcp 库，真实的 ensure_connected_sync 会
+    spawn 子进程（stdio）或发起网络请求（sse），既慢又污染环境。
+
+    同时把 MCP_ENABLED 置为 True —— TestingConfig 默认关闭，
+    否则所有 MCP 路由会在开关检查处直接返回 400。
+
+    返回一个控制器对象，可设置假连接的返回值与记录调用。
+    """
+    from app.services.tool_service import get_mcp_manager
+
+    app.config["MCP_ENABLED"] = True
+
+    manager = get_mcp_manager()
+
+    class FakeMCPController:
+        def __init__(self):
+            self.connect_result = True          # ensure_connected_sync 的返回值
+            self.connect_calls = []             # [(name, config), ...]
+            self.remove_calls = []              # [name, ...]
+            # 连接成功后挂到假连接对象上的工具列表，可按需覆写
+            self.fake_tools = [{'type': 'function',
+                                'function': {'name': 'fake__tool', 'parameters': {}}}]
+
+        def set_connect_result(self, value):
+            self.connect_result = value
+
+    controller = FakeMCPController()
+
+    class FakeConnection:
+        """模拟 MCPServerConnection 的运行时状态。
+
+        真实 ensure_connected_sync 连接成功后会把连接对象放进 manager.servers，
+        mock 必须同样填充 —— 否则 get_tools() 遍历时看不到工具，
+        测试就无法验证「工具真的暴露给了模型」这条链路。
+        """
+
+        def __init__(self, name, transport):
+            self.name = name
+            self.transport = transport
+            self.is_connected = True
+            self.tools = list(controller.fake_tools)
+
+    def fake_ensure_connected(name, config):
+        controller.connect_calls.append((name, dict(config or {})))
+        if controller.connect_result:
+            transport = (config or {}).get('transport', 'stdio')
+            manager.servers[name] = FakeConnection(name, transport)
+        else:
+            manager.servers.pop(name, None)
+        return controller.connect_result
+
+    def fake_remove(name):
+        controller.remove_calls.append(name)
+        # 同步内存态：真实实现会把连接从 servers 摘掉
+        manager.servers.pop(name, None)
+        return True
+
+    monkeypatch.setattr(manager, "ensure_connected_sync", fake_ensure_connected)
+    monkeypatch.setattr(manager, "remove_server_sync", fake_remove)
+
+    # 每个测试从干净状态开始，避免上一个测试残留的连接对象影响断言
+    manager.servers.clear()
+
+    yield controller
+
+    manager.servers.clear()
+    app.config["MCP_ENABLED"] = False
+
+
+@pytest.fixture(scope="function")
+def second_user(app, db):
+    """第二个普通用户，用于验证用户间数据隔离。返回 User 对象。"""
+    from app.models import User
+
+    with app.app_context():
+        user = User(username="otheruser", email="other@example.com")
+        user.set_password("otherpass123")
+        db.session.add(user)
+        db.session.commit()
+
+        yield user
+
+        db.session.remove()
+
+
+@pytest.fixture(scope="function")
+def second_client(app, db, second_user):
+    """第二个普通用户的已登录客户端。"""
+    from app.services.auth_service import generate_token
+
+    with app.app_context():
+        token = generate_token(second_user.id)
+    yield _make_authed_client(app.test_client(), token)
+

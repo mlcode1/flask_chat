@@ -16,6 +16,8 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from flask import current_app
 
+from app.services import mcp_service
+
 logger = logging.getLogger(__name__)
 
 # ========== Skill 和 MCP 全局实例 ==========
@@ -341,12 +343,22 @@ def get_tools(user_id=None):
             logger.error(f"Failed to load skill tools: {e}", exc_info=True)
     
     # 3. 添加 MCP 工具（如果启用）
+    #
+    # ⚠️ 必须按用户可见性过滤：MCPClientManager.servers 以 name 为全局键，
+    # 不含归属信息。不过滤会把用户 A 的定制服务器工具暴露给用户 B。
+    #
+    # 注意：此处只列出「已连接」的服务器工具，绝不触发连接 ——
+    # get_tools 在每轮 LLM 调用前都会执行，若在此尝试连接不可用的服务器，
+    # 每轮都会阻塞最长 30 秒（connect 超时），导致聊天卡死。
+    # 连接发生在：启动时批量连接 / add 接口 / reconnect 接口。
     if current_app.config.get('MCP_ENABLED', False):
         try:
             mcp_manager = _get_mcp_manager()
-            mcp_tools = mcp_manager.get_all_tools()
+            allowed = mcp_service.visible_server_names(user_id)
+            mcp_tools = mcp_manager.get_all_tools(allowed_servers=allowed)
             tools.extend(mcp_tools)
-            logger.debug(f"Added {len(mcp_tools)} tools from MCP servers")
+            logger.debug(f"Added {len(mcp_tools)} tools from MCP servers "
+                         f"(visible: {allowed}, user_id={user_id})")
         except Exception as e:
             logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
     
@@ -460,6 +472,19 @@ def execute_tool(name, arguments, user_id=None):
                 # 优先检查是否是 MCP 工具（前缀匹配已连接的 MCP 服务器）
                 mcp_manager = _get_mcp_manager()
                 if mcp_manager and prefix in mcp_manager.servers:
+                    # ⚠️ 权限校验：必须确认当前用户有权调用该服务器。
+                    # 仅靠 get_tools() 隐藏工具列表不够 —— 用户可以直接构造
+                    # 工具名（如 myserver__read_file）绕过 UI 调用他人的定制服务器。
+                    # fail-closed：数据库中查不到归属则拒绝。
+                    if not mcp_service.is_visible_to(prefix, user_id):
+                        logger.warning(
+                            f"拒绝 MCP 工具调用: user_id={user_id} 无权访问服务器 '{prefix}' "
+                            f"(tool={name})"
+                        )
+                        return json.dumps({
+                            "error": f"无权访问 MCP 服务器 '{prefix}'"
+                        }, ensure_ascii=False)
+
                     logger.info(f"Executing MCP tool: {name}")
                     try:
                         return mcp_manager.execute_tool_sync(name, args)

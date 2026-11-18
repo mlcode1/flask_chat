@@ -114,6 +114,11 @@ class Config:
         except (json.JSONDecodeError, TypeError) as e:
             print(f"⚠️ MCP_SERVERS_CONFIG JSON 解析失败: {e}")
 
+    # 是否允许非管理员用户自助添加 MCP 服务器（配置持久化到 mcp_servers 表）。
+    # ⚠️ 即使开启，用户也只能添加 sse（远程 HTTP）类型；
+    #    stdio 会 spawn 任意本地进程（等价 RCE），始终仅管理员可添加。
+    MCP_ALLOW_USER_CUSTOM = os.getenv("MCP_ALLOW_USER_CUSTOM", "false").lower() == "true"
+
     # Logging (结构化日志)
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FORMAT = os.getenv("LOG_FORMAT", "human")  # 'human' or 'json'

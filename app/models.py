@@ -22,6 +22,9 @@ class User(db.Model):
     conversations = db.relationship("Conversation", backref="user", lazy="dynamic", cascade="all, delete-orphan")
     documents = db.relationship("Document", backref="user", lazy="dynamic", cascade="all, delete-orphan")
     code_repositories = db.relationship("CodeRepository", backref="user", lazy="dynamic", cascade="all, delete-orphan")
+    # MCP 定制服务器随用户删除（mcp_servers.user_id 为 nullable=True，
+    # 全局服务器 user_id 为 NULL，不受影响）
+    mcp_servers = db.relationship("MCPServer", backref="user", lazy="dynamic", cascade="all, delete-orphan")
 
     def set_password(self, password):
         """设置密码（哈希存储）"""
@@ -221,6 +224,89 @@ class CodeRepository(db.Model):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class MCPServer(db.Model):
+    """MCP 服务器配置（持久化）。
+
+    取代此前"仅存内存 manager.servers、重启即丢"的设计。
+
+    归属语义：
+      - user_id 为 NULL  → 全局服务器，所有用户可见可用
+                           （与 .env 的 MCP_SERVERS_CONFIG 同级）
+      - user_id 非 NULL  → 归属该用户的定制服务器，仅本人可见
+
+    ⚠️ name 必须全局唯一：MCPClientManager 以 name 为键管理连接，
+    且工具名格式为 {server_name}__{tool_name}，重名会导致工具路由错乱。
+    这与 CodeRepository.name 的约定一致。
+    """
+    __tablename__ = "mcp_servers"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    transport = db.Column(db.String(20), default="stdio", nullable=False)  # stdio | sse
+    config = db.Column(db.JSON, nullable=False)      # {command, args, env, url, headers}
+    enabled = db.Column(db.Boolean, default=True, nullable=False)
+    source = db.Column(db.String(20), default="user")  # user(界面添加) | env(配置文件)
+    status = db.Column(db.String(20), default="disconnected")  # connected/disconnected/failed
+    error_message = db.Column(db.Text, nullable=True)
+    tools_count = db.Column(db.Integer, default=0)
+    last_connected_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
+                           onupdate=lambda: datetime.now(timezone.utc))
+
+    # 反向关系由 User.mcp_servers 的 backref="user" 提供，
+    # 此处不再定义，避免重复注册同名 relationship。
+    # cascade 必须在一对多侧（User），否则删除服务器会连带删掉用户。
+
+    # 可能含密钥的字段，默认序列化时脱敏
+    SECRET_FIELDS = ("env", "headers")
+
+    @staticmethod
+    def _redact(value):
+        """脱敏 dict：保留键名（便于排查配置），值一律掩码。"""
+        if not isinstance(value, dict):
+            return "***"
+        return {k: "***" for k in value.keys()}
+
+    def to_dict(self, include_secrets=False):
+        """序列化为字典。
+
+        Args:
+            include_secrets: 是否返回 env / headers 原值。
+                默认 False —— 这两个字段常含 API Key、代理凭据，
+                不应随列表接口下发给前端。仅管理员查看单个服务器详情时传 True。
+        """
+        cfg = dict(self.config or {})
+        if not include_secrets:
+            for field in self.SECRET_FIELDS:
+                if cfg.get(field):
+                    cfg[field] = self._redact(cfg[field])
+
+        return {
+            "id": self.id,
+            "name": self.name,
+            "user_id": self.user_id,
+            "scope": "global" if self.user_id is None else "user",
+            "transport": self.transport,
+            "config": cfg,
+            "enabled": self.enabled,
+            "source": self.source,
+            "status": self.status,
+            "error_message": self.error_message,
+            "tools_count": self.tools_count,
+            "last_connected_at": self.last_connected_at.isoformat() if self.last_connected_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    def to_connection_config(self):
+        """转换为 MCPClientManager 需要的连接配置格式。"""
+        cfg = dict(self.config or {})
+        cfg["transport"] = self.transport
+        return cfg
 
 
 class IndexedFile(db.Model):
