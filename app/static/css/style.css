@@ -251,6 +251,114 @@ body {
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
 }
 
+/* 宽版弹窗：用于内容较宽的管理面板（如 MCP 服务器管理）。
+
+   ⚠️ 必须同时覆盖 width —— .modal-box 的 width:320px 是固定值，
+   只改 max-width 不会变宽（320 < max-width 时以 width 为准）。
+   此前 index.html 用内联 style="max-width:600px" 就踩了这个坑，
+   弹窗实际一直渲染成 320px。 */
+.modal-box.modal-wide {
+    width: min(720px, 92vw);
+    max-width: 92vw;
+    max-height: 86vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 宽弹窗的内容区可滚动，避免服务器多时撑破屏幕 */
+.modal-box.modal-wide .modal-body {
+    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding-right: 4px;
+}
+
+/* MCP 服务器列表项 */
+.mcp-server-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    margin-bottom: 8px;
+}
+
+.mcp-server-info {
+    flex: 1 1 auto;
+    min-width: 0;          /* 关键：允许子元素收缩，长名字才会省略号而非撑破布局 */
+}
+
+.mcp-server-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    word-break: break-all;
+}
+
+.mcp-server-meta {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin-top: 3px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+}
+
+.mcp-server-error {
+    color: #ef4444;
+    font-size: 0.78rem;
+    margin-top: 4px;
+    word-break: break-word;
+}
+
+/* 操作按钮组：不换行、不被压缩 */
+.mcp-server-actions {
+    display: flex;
+    gap: 6px;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.mcp-action-btn {
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 3px 10px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: var(--text-primary);
+    white-space: nowrap;
+}
+
+.mcp-action-btn:hover:not(:disabled) {
+    /* 项目未定义 --bg-hover；rgba 黑在浅色主题(--bg-chat:#f5f5f5)下通用 */
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.mcp-action-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.mcp-action-btn.danger {
+    border-color: #ef4444;
+    color: #ef4444;
+}
+
+.mcp-readonly-tag {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    align-self: center;
+    white-space: nowrap;
+}
+
+.mcp-empty-hint {
+    color: var(--text-secondary);
+    padding: 8px 0;
+}
+
 .modal-title {
     color: var(--text-primary);
     font-size: 16px;

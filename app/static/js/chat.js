@@ -2826,18 +2826,18 @@
     async function loadMcpServers() {
         const listDiv = document.getElementById('mcp-server-list');
         if (!listDiv) return;
-        listDiv.innerHTML = '<div style="color:#888;">加载中...</div>';
+        listDiv.innerHTML = '<div class="mcp-empty-hint">加载中...</div>';
 
         try {
             const res = await authFetch('/api/skills/mcp/servers');
             if (!res.ok) {
-                listDiv.innerHTML = '<div style="color:#888;">MCP 未启用</div>';
+                listDiv.innerHTML = '<div class="mcp-empty-hint">MCP 未启用（MCP_ENABLED=false）</div>';
                 return;
             }
             const data = await res.json();
 
             if (!data.servers || data.servers.length === 0) {
-                listDiv.innerHTML = '<div style="color:#888;">暂无 MCP 服务器配置</div>';
+                listDiv.innerHTML = '<div class="mcp-empty-hint">暂无 MCP 服务器配置，可在下方添加。</div>';
                 return;
             }
 
@@ -2853,21 +2853,31 @@
                 const st = stateOf(s);
                 const scope = s.scope === 'global' ? '全局' : '我的';
                 const source = s.source === 'env' ? '配置文件' : '界面添加';
-                // 只有管理员或归属者能管理，否则不渲染按钮（避免点了报 403）
+                // 服务器名已由后端校验为 [A-Za-z0-9_-]，不含引号，可安全放入属性值
+                const nm = escapeHtml(s.name);
+
+                // 只有管理员或归属者能管理，否则显示只读标记（避免点了报 403）
                 const actions = s.can_manage ? `
-                    <div>
-                        <button class="mcp-toggle-btn" data-name="${escapeHtml(s.name)}" data-enabled="${s.enabled === false ? 'true' : 'false'}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;">${s.enabled === false ? '启用' : '禁用'}</button>
-                        <button class="mcp-reconnect-btn" data-name="${escapeHtml(s.name)}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;margin-left:4px;">重连</button>
-                        <button class="mcp-remove-btn" data-name="${escapeHtml(s.name)}" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.85rem;margin-left:4px;">移除</button>
-                    </div>` : '<div style="color:#888;font-size:0.8rem;">只读</div>';
+                    <div class="mcp-server-actions">
+                        <button class="mcp-action-btn mcp-toggle-btn" data-name="${nm}" data-enabled="${s.enabled === false ? 'true' : 'false'}">${s.enabled === false ? '启用' : '禁用'}</button>
+                        <button class="mcp-action-btn mcp-reconnect-btn" data-name="${nm}">重连</button>
+                        <button class="mcp-action-btn danger mcp-remove-btn" data-name="${nm}">移除</button>
+                    </div>` : '<div class="mcp-readonly-tag">只读</div>';
 
                 return `
-                <div class="mcp-server-item" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;margin-bottom:6px;">
-                    <div>
-                        <span style="font-weight:600;">${escapeHtml(s.name)}</span>
-                        <span style="color:${st.color};font-size:0.85rem;margin-left:6px;">${st.text}</span>
-                        <span style="color:#888;font-size:0.8rem;margin-left:6px;">${escapeHtml(s.transport || '')} · ${s.tools_count || 0} 个工具 · ${scope} · ${source}</span>
-                        ${s.error_message ? `<div style="color:#ef4444;font-size:0.78rem;margin-top:2px;">${escapeHtml(s.error_message)}</div>` : ''}
+                <div class="mcp-server-item">
+                    <div class="mcp-server-info">
+                        <div>
+                            <span class="mcp-server-name">${nm}</span>
+                            <span style="color:${st.color};font-size:0.85rem;margin-left:8px;">${st.text}</span>
+                        </div>
+                        <div class="mcp-server-meta">
+                            <span>${escapeHtml(s.transport || '')}</span>
+                            <span>${s.tools_count || 0} 个工具</span>
+                            <span>${scope}</span>
+                            <span>${source}</span>
+                        </div>
+                        ${s.error_message ? `<div class="mcp-server-error">${escapeHtml(s.error_message)}</div>` : ''}
                     </div>
                     ${actions}
                 </div>`;
@@ -2937,7 +2947,7 @@
             });
 
         } catch (e) {
-            listDiv.innerHTML = '<div style="color:#ef4444;">加载失败</div>';
+            listDiv.innerHTML = '<div class="mcp-server-error">加载失败</div>';
         }
     }
 
