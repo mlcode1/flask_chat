@@ -14,13 +14,17 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用�
 - **对话模板** — 预设模板（代码审查、知识库问答、技术架构师、SQL 分析师、学习导师），新建对话时选择模板自动应用 system_prompt
 - **Agent 工作流** — 多步骤推理与工具链调用，支持任务分解、自动规划、执行步骤可视化展示
 - **语音输入** — 基于浏览器 Web Speech API 的语音识别，支持中文，录音状态实时反馈
-- **Webhook 集成** — 出站回调（对话完成后触发通知）和入站 API（外部系统触发对话）-> 还未实现
+- **Webhook 集成** — 出站回调（对话完成后触发通知）和入站 API（外部系统触发对话）
 - **多模型切换** — 支持配置多个大语言模型，用户可在对话中自由切换；兼容 OpenAI API 协议的任意服务（包括 Ollama 本地模型）
 - **WebSocket 流式输出** — 基于 Flask-SocketIO + eventlet 实现实时双向通信，逐字流式响应
 - **流式打断** — 支持在 AI 回复过程中随时打断生成
-- **工具调用** — 支持 Function Calling，内置获取时间、数学计算、代码执行、知识库检索、代码库检索等工具；支持 Skill 插件系统（本地 Python 插件，热加载，命名空间隔离）和 MCP 协议集成（通过 stdio/SSE 连接外部工具服务器，自动发现工具并注册）
+- **工具调用** — 支持 Function Calling，三层统一分发（内置工具 / Skill 插件 / MCP），工具名按 `{命名空间}__{工具名}` 拼接，执行时反解路由并做执行期权限校验
+  - **内置工具**：`get_current_time`、`read_file` 始终可用；`knowledge_search`（需 `KNOWLEDGE_SEARCH_ENABLED`）、`search_code`（需 `CODE_INDEX_ENABLED`）、`web_search`（需 `WEB_SEARCH_ENABLED`）、`execute_code`（需 `CODE_EXEC_ENABLED`）、`query_database` 按开关加载；`list_dir` / `read_code_file` / `write_file` / `edit_file` / `run_shell` 在用户拥有已索引代码库时自动启用（路径限制在这些代码库内）
+  - **Skill 插件**：本地 Python 插件，热加载，命名空间隔离（目录见 `SKILLS_DIR`，内置 `calculate` / `weather` 示例）
+  - **MCP**：通过 stdio / SSE 连接外部工具服务器，自动发现工具并注册
 - **工具可靠性保障** — 单次执行 30 秒超时控制（`ThreadPoolExecutor`），连续失败 5 次自动熔断 60 秒，工具调用轮次上限 10 轮（达上限后撤掉工具强制模型总结作答），防止异常工具拖垮系统或陷入死循环
 - **MCP 服务器管理 UI** — 侧边栏可视化查看连接状态与工具列表，支持运行时添加、更新、启用/禁用、重连、移除；配置持久化到数据库（重启自动恢复），支持管理员配置全局服务器或用户定制专属服务器（按用户隔离，仅归属者可见可用）
+- **MCP 权限与校验** — `stdio` 仅管理员可配置，`sse` 可按开关开放给普通用户；`sse` URL 会做安全校验，并支持主机白名单；服务器连接在后台进行，不阻塞服务启动
 - **消息排队** — AI 回复过程中用户可继续输入消息，消息排队等待，队列中的消息可编辑（恢复到输入框）和取消；AI 回复完成后自动发送队列中的下一条消息
 - **消息编辑与删除** — 支持 hover 编辑用户消息（编辑后重新生成 AI 回复）和删除消息（删除该消息及之后的所有消息）
 - **工具调用中断** — 工具执行过程中检测中断信号，执行完当前工具后跳过后续工具调用，避免长时间阻塞
@@ -51,16 +55,16 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用�
 | ORM | Flask-SQLAlchemy（手写 SQL 迁移脚本） |
 | 数据库 | PostgreSQL + pgvector |
 | 认证 | PyJWT（JWT Token，WebSocket 亦走 JWT） |
-| 缓存/限流 | 内存缓存 / Redis（双模式，可切换） |
+| 缓存 | 内存缓存 / Redis（双模式，可切换） |
 | LLM 接口 | OpenAI SDK（兼容任意 OpenAI 协议服务，实际接火山引擎网关） |
 | Embedding 模型 | Ollama（qwen3-embedding:8b，4096 维）或第三方 Embedding 服务 |
 | 向量检索 | pgvector（余弦相似度召回 + BM25 重排的混合检索） |
 | RAG / 代码索引构建 | LlamaIndex + CodeSplitter（tree-sitter）+ PGVectorStore |
 | 文件解析 | pypdf、python-docx |
-| 工具扩展 | MCP SDK（stdio/SSE）+ 自研 Skill 插件（importlib 热加载） |
-| 可观测性 | LangSmith（`@traceable` 装饰器 + 环境变量） |
-| 安全 | JWT 认证、API Key 认证、Prompt Injection 过滤、路径白名单、敏感信息脱敏、用户级数据隔离 |
-| 可靠性 | 工具超时（ThreadPoolExecutor）+ 熔断器、模型重试与降级、启动状态自愈 |
+| 工具扩展 | MCP SDK 2.x（stdio/SSE）+ 自研 Skill 插件（importlib 热加载） |
+| 可观测性 | LangSmith（`@traceable` 装饰器 + 环境变量）、自建监控（`/api/metrics`） |
+| 安全 | JWT 认证、API Key 认证、Prompt Injection 过滤、代码库路径白名单（realpath 归一化比对）、MCP SSE URL 的 SSRF 校验、敏感信息脱敏、用户级数据隔离、MCP 传输分级授权 |
+| 可靠性 | 工具超时（ThreadPoolExecutor）+ 熔断器、模型重试与降级、启动状态自愈、MCP 后台异步初始化 |
 | 容器化 | Docker + docker-compose |
 | 前端 | 原生 HTML / CSS / JavaScript（IIFE + marked.js 渲染 Markdown，无构建工具） |
 
@@ -68,68 +72,73 @@ Flask Chat 是一个基于 Flask 构建的 AI 智能对话应用，支持多用�
 
 ```
 flask_chat/
-├── run.py                             # 启动入口（eventlet.monkey_patch）
+├── run.py                             # 启动入口（eventlet.monkey_patch + create_app + socketio.run）
 ├── requirements.txt                   # Python 依赖
-├── .env.example                       # 环境变量模板
+├── .env.example                       # 环境变量模板（70 个有效键，与 .env 保持双向一致）
 ├── Dockerfile                         # Docker 镜像构建
 ├── docker-compose.yml                 # Docker Compose 编排
-├── tests/                             # 单元测试 & 集成测试
-│   ├── conftest.py                    # pytest 配置和 fixtures
+├── migrations/                        # 手写 SQL 迁移脚本（按日期命名）
+├── skills/                            # Skill 插件目录（由 SKILLS_DIR 指定）
+│   ├── calculate/                     # 数学计算技能：__init__.py（继承 BaseSkill）+ skill.json
+│   └── weather/                       # 天气查询技能（示例）
+├── tests/                             # 单元 & 集成测试
+│   ├── conftest.py                    # pytest 配置与 fixtures
 │   ├── test_utils.py                  # 工具函数测试
 │   ├── test_models.py                 # 数据模型测试
-│   └── test_chat_api.py              # API 集成测试
+│   ├── test_chat_api.py              # API 集成测试
+│   └── test_mcp_persistence.py       # MCP 配置持久化与权限隔离测试
 ├── scripts/
-│   └── diagnose_index.py             # 索引诊断脚本
+│   ├── diagnose_index.py             # 索引诊断脚本
+│   └── sse_test_server.py            # 最小 SSE MCP 测试服务器（本地调试用）
 └── app/
     ├── __init__.py                    # 应用工厂（create_app + 蓝图注册 + 扩展初始化）
-    ├── config.py                      # 配置类
+    ├── config.py                      # 配置类（Config / TestingConfig）
     ├── errors.py                      # 统一错误处理（APIError 基类 + 全局处理器）
     ├── extensions.py                  # Flask 扩展（SQLAlchemy）
     ├── logging_config.py              # 结构化日志配置
     ├── middleware.py                  # 中间件（免责声明等）
-    ├── models.py                      # 数据模型（User, Conversation, Message 等）
+    ├── models.py                      # 数据模型（User, Conversation, Message, MCPServer 等 11 个）
     ├── monitoring.py                  # 性能监控（请求耗时、指标收集）
     ├── utils.py                       # 共享工具函数（token 估算等）
     ├── websocket.py                   # WebSocket 事件处理器（实时通信核心 + 用户追踪）
     ├── routes/
-    │   ├── auth.py                    # 认证路由（注册/登录/登出/验证）
-    │   ├── chat.py                    # 对话、验证、分享、导出、反馈、页面路由
-    │   ├── rag.py                     # RAG 知识库路由
-    │   ├── code_index.py             # 代码库索引管理 API
-    │   ├── template.py               # 对话模板管理 API
-    │   ├── agent.py                   # Agent 工作流 API
-    │   ├── webhook.py                 # Webhook 管理 API
-    │   └── speech.py                  # 语音 I/O API
-    ├── services/
+    │   ├── auth.py                    # /api/auth —— 注册/登录/登出/me/verify
+    │   ├── chat.py                    # 对话、配置开关、验证、分享、导出、反馈、统计、页面路由
+    │   ├── rag.py                     # /api/documents —— RAG 知识库路由
+    │   ├── code_index.py             # /api/code-repos —— 代码库索引管理 API
+    │   ├── template.py               # /api/templates —— 对话模板管理 API
+    │   ├── agent.py                   # /api/agent —— Agent 工作流 API
+    │   ├── webhook.py                 # /api/webhooks —— Webhook 管理 API
+    │   ├── speech.py                  # /api/speech —— 语音 I/O API
+    │   └── skills.py                  # /api/skills —— Skill 管理 + MCP 服务器管理（含归属与传输分级授权）
+    ├── services/                      # 18 个服务模块
     │   ├── ai_service.py             # AI 服务（流式输出 + 工具调用循环 + 模型降级 + 中断检查）
     │   ├── auth_service.py           # JWT 认证服务（Token 生成/验证/登录/注册）
-    │   ├── context_service.py        # 上下文管理（窗口裁剪 + 压缩 + 长期记忆 + system_prompt + MCP 工具动态注入）
+    │   ├── context_service.py        # 上下文管理（窗口裁剪 + 压缩 + 长期记忆 + system_prompt + MCP 工具注入）
     │   ├── rag_service.py            # RAG 服务（解析/分块/嵌入/存储/混合检索/BM25缓存）
     │   ├── verifier_service.py       # 结果验证服务（独立 Agent 验证）
-    │   ├── tool_service.py           # 工具定义与执行（内置工具 + Skill + MCP 统一分发，用户权限传递）
+    │   ├── tool_service.py           # 工具定义与执行（内置 + Skill + MCP 统一分发，超时/熔断/权限校验）
     │   ├── cache_service.py          # 响应缓存（内存/Redis 双模式）
     │   ├── retry_service.py          # 重试与降级（指数退避 + fallback）
     │   ├── security_service.py       # 安全（API Key 认证 / 注入过滤 / 审计日志）
+    │   ├── ssrf_guard.py             # SSE URL 的 SSRF 校验（协议白名单 + 内网/元数据拦截 + 域名全记录解析）
     │   ├── code_index_service.py     # 代码索引查询服务（pgvector 向量搜索 + 用户隔离）
     │   ├── code_index_builder.py     # 代码索引构建服务（LlamaIndex + 全量/增量 + 混合摘要）
     │   ├── template_service.py       # 对话模板 CRUD + 默认模板初始化
     │   ├── agent_service.py          # Agent 工作流（多步骤推理 + 工具链调用）
     │   ├── webhook_service.py        # Webhook 服务（出站回调 + 入站触发）
+    │   ├── mcp_service.py            # MCP 配置持久化、归属校验、可见性过滤、用户级懒连接
     │   └── speech_service.py         # 语音服务（STT/TTS，OpenAI Whisper + Edge TTS）
-    ├── skills/                        # Skill 插件目录（热加载）
-    │   ├── calculate/                 # 数学计算技能（表达式计算/单位转换/数学函数）
-    │   │   ├── __init__.py            # Skill 实现（继承 BaseSkill）
-    │   │   └── skill.json             # Skill 元数据
-    │   └── weather/                   # 天气查询技能（示例）
-    │       ├── __init__.py
-    │       └── skill.json
+    ├── skills/                        # Skill 框架代码（插件目录在项目根的 skills/）
+    │   ├── base.py                    # BaseSkill 基类（工具注册、get_tools 加命名空间前缀）
+    │   └── loader.py                  # SkillLoader（发现/加载/卸载/热重载/工具路由）
     ├── mcp/                           # MCP 客户端模块
     │   ├── __init__.py                # 导出 MCPClientManager, MCPServerConnection
-    │   └── client_manager.py          # MCP 客户端管理器（持久后台事件循环 + stdio/SSE + 自动工具发现）
+    │   └── client_manager.py          # MCP 客户端管理器（持久后台事件循环 + stdio/SSE + 工具发现）
     ├── static/
     │   ├── css/style.css
     │   └── js/
-    │       ├── chat.js               # 主对话页交互逻辑（IIFE，含 Agent/语音/模板选择）
+    │       ├── chat.js               # 主对话页交互逻辑（IIFE，含 Agent/语音/模板/MCP 管理面板）
     │       ├── knowledge.js          # 知识库管理页独立逻辑
     │       ├── code_repos.js         # 代码库管理页独立逻辑
     │       ├── marked.min.js         # Markdown 渲染（本地）
@@ -141,6 +150,8 @@ flask_chat/
         ├── code_repos.html           # 代码库管理页
         └── shared.html               # 分享对话查看页
 ```
+
+> 新增 Skill 插件请放到**项目根的 `skills/`** 下（`app/skills/` 是框架代码）。
 
 ### 数据模型
 
@@ -155,15 +166,17 @@ flask_chat/
 | `ConversationTemplate` | `conversation_templates` | 对话模板（名称、描述、system_prompt、分类） |
 | `AuditLog` | `audit_logs` | 审计日志 |
 | `CodeRepository` | `code_repositories` | 代码仓库配置（含 `user_id` 用户隔离，名称、路径、索引状态、进度等） |
+| `MCPServer` | `mcp_servers` | MCP 服务器配置（`name` 唯一且作工具名前缀、`transport` stdio/sse、`config` JSON、`user_id` 为 NULL 表全局、`source` user/env、`status` 运行时状态、`tools_count`）。`env`/`headers` 可能含密钥，序列化时默认脱敏 |
 | `IndexedFile` | `indexed_files` | 文件索引记录（路径、SHA256 哈希、修改时间，用于增量索引） |
 
 ### 环境要求
 
-- Python 3.10+
+- Python 3.10+（Docker 镜像用 3.11，本地开发实测于 3.14）
 - PostgreSQL 15+（需安装 pgvector 扩展）
 - Ollama（用于本地 Embedding 模型，也可选用于本地大语言模型）
 - Redis（可选，生产环境缓存加速）
 - Docker & Docker Compose（可选，容器化部署）
+- Node.js（`npx`）或 `uv`（`uvx`）—— 仅当启用 MCP 的 `stdio` 传输时需要，用于拉起外部 MCP 服务器子进程
 
 ### 快速开始
 
@@ -234,7 +247,18 @@ cp .env.example .env
 | `RAG_QUERY_REWRITE_ENABLED` | 是否启用多查询重写 | `false` |
 | `RAG_RERANK_ENABLED` | 是否启用结果重排序 | `false` |
 | `CODE_EXEC_ENABLED` | 是否启用代码执行工具 | `true` |
+| `CODE_EXEC_TIMEOUT` | `execute_code` 工具的执行超时（秒） | `10` |
+| `CODE_EDIT_SHELL_TIMEOUT` | `run_shell` 工具的超时（秒） | `30` |
+| `SEARCH_MAX_RESULTS` | `web_search` 返回的结果条数上限 | `5` |
 | `KNOWLEDGE_SEARCH_ENABLED` | 是否启用知识库检索工具（可在页面切换） | `false` |
+| **联网搜索配置** | | |
+| `WEB_SEARCH_ENABLED` | 是否启用 `web_search` 工具 | `false` |
+| `WEB_SEARCH_PROVIDER` | 搜索提供方（`duckduckgo` 免密钥 / `tavily` 需 API Key） | `duckduckgo` |
+| `TAVILY_API_KEY` | Tavily API Key（`WEB_SEARCH_PROVIDER=tavily` 时必填） | 空 |
+| **文件上传** | | |
+| `UPLOAD_FOLDER` | 文件上传目录 | `uploads` |
+| `IMAGE_UPLOAD_FOLDER` | 图片上传目录 | `uploads/images` |
+| `MAX_CONTENT_LENGTH` | 单次请求体大小上限（字节） | `52428800`（50 MB） |
 | `API_KEY` | API 鉴权密钥（留空则跳过鉴权） | 空 |
 | `INPUT_FILTER_ENABLED` | 是否启用 Prompt Injection 输入过滤 | `true` |
 | **缓存配置** | | |
@@ -276,8 +300,11 @@ cp .env.example .env
 | `SKILLS_DIR` | Skill 插件目录 | `skills` |
 | **MCP 配置** | | |
 | `MCP_ENABLED` | 是否启用 MCP 协议集成 | `false` |
-| `MCP_SERVERS_CONFIG` | MCP 服务器配置（JSON 字符串，如 `{"fetch":{"transport":"stdio","command":"uvx","args":["mcp-server-fetch"],"env":{"HTTP_PROXY":"...","HTTPS_PROXY":"..."}}}`）。启动时同步一份到 `mcp_servers` 表，界面改过则不再被覆盖 | 空 |
-| `MCP_ALLOW_USER_CUSTOM` | 是否允许非管理员用户自助添加 MCP 服务器（仅 sse；stdio 始终限管理员） | `false` |
+| `MCP_SERVERS_CONFIG` | MCP 服务器配置（JSON 字符串，如 `{"fetch":{"transport":"stdio","command":"uvx","args":["mcp-server-fetch"]}}`）。启动时同步一份到 `mcp_servers` 表；若在界面上改过（`source` 变为 `user`），则不再被 `.env` 覆盖 | 空 |
+| `MCP_ALLOW_USER_CUSTOM` | 是否允许非管理员用户自助添加 MCP 服务器（仅 `sse`；`stdio` 始终仅管理员） | `false` |
+| `MCP_SSE_ALLOWED_HOSTS` | sse URL 的主机白名单（逗号分隔、小写、不含端口），命中的主机跳过 URL 校验。留空表示全部主机都校验；本地调试可填 `127.0.0.1,localhost` | 空 |
+| **测试** | | |
+| `TEST_DATABASE_URL` | 测试库连接串，必须是 PostgreSQL 且库名以 `_test` 结尾。留空则自动取 `DATABASE_URL` 的库名加 `_test` 后缀 | 空 |
 
 **5. 数据库初始化**
 
@@ -322,6 +349,9 @@ docker-compose logs -f app
 # 停止
 docker-compose down
 ```
+
+> Docker 下由 gunicorn 监听 **5000**（`http://localhost:5000`），
+> 本地 `python run.py` 则是 **8080**（`http://localhost:8080`）。
 
 ### 缓存配置
 
@@ -402,6 +432,29 @@ EMBEDDING_DIM=3072
 
 权限控制贯穿完整调用链：WebSocket 连接 → AI 服务 → 工具执行 → 搜索服务，确保 B 用户无法访问 A 用户的知识库和代码库数据。
 
+### MCP 服务器接入
+
+MCP（Model Context Protocol）用于接入外部工具服务器，支持两种传输方式：
+
+| 传输 | 说明 | 可添加者 |
+|------|------|---------|
+| `stdio` | 在服务器上拉起子进程运行 MCP 服务器（如 `npx`、`uvx`） | 仅管理员 |
+| `sse` | 连接远端 HTTP 服务 | 管理员；开启 `MCP_ALLOW_USER_CUSTOM` 后普通用户也可添加 |
+
+添加后服务器配置持久化到数据库，重启自动恢复；工具会自动发现并以 `{服务器名}__{工具名}`
+的形式注册给模型。可在侧边栏「MCP 服务器」面板查看连接状态、工具数量，并做启用/禁用、
+重连、移除等操作。
+
+**本地调试 sse**：仓库自带 `scripts/sse_test_server.py`，是一个提供 `echo` / `add` /
+`server_info` 三个工具的最小测试服务器：
+
+```bash
+python scripts/sse_test_server.py     # 监听 127.0.0.1:9111
+```
+
+然后在面板里添加：名称 `sse_test`、类型 `sse`、URL `http://127.0.0.1:9111/sse`。
+连接本机地址需在 `.env` 中设置 `MCP_SSE_ALLOWED_HOSTS=127.0.0.1,localhost`。
+
 ### 代码库索引管理
 
 代码库索引管理功能允许用户通过 Web UI 配置本地代码仓库，并构建向量索引。AI 在对话中通过 `search_code` 工具自动检索相关代码片段。
@@ -469,13 +522,18 @@ EMBEDDING_DIM=3072
 pytest tests/
 
 # 运行特定测试
-pytest tests/test_utils.py
-pytest tests/test_models.py
-pytest tests/test_chat_api.py
+pytest tests/test_utils.py                  # 工具函数
+pytest tests/test_models.py                 # 数据模型
+pytest tests/test_chat_api.py               # API 集成
+pytest tests/test_mcp_persistence.py        # MCP 配置持久化与权限隔离
 
 # 查看详细输出
 pytest tests/ -v -s
 ```
+
+> 测试需要一个独立的 PostgreSQL 库（库名以 `_test` 结尾），由 `TEST_DATABASE_URL` 指定；
+> 未指定时自动取 `DATABASE_URL` 的库名加 `_test` 后缀。涉及 MCP 的用例不会真的拉起子进程
+> 或发起网络请求。
 
 ### API 接口
 
@@ -485,6 +543,7 @@ pytest tests/ -v -s
 |------|------|------|
 | `POST` | `/api/auth/register` | 注册（`{"username": "...", "email": "...", "password": "..."}` ） |
 | `POST` | `/api/auth/login` | 登录（`{"username": "...", "password": "..."}` ），返回 JWT Token |
+| `POST` | `/api/auth/logout` | 登出 |
 | `GET` | `/api/auth/me` | 获取当前用户信息（需 Bearer Token） |
 | `GET` | `/api/auth/verify` | 验证 Token 有效性 |
 
@@ -499,10 +558,12 @@ pytest tests/ -v -s
 | `GET` | `/api/models` | 获取可用模型列表 |
 | `GET` | `/api/conversations` | 获取当前用户的对话列表 |
 | `POST` | `/api/conversations` | 创建新对话（可选 `{"title": "...", "template_id": 1}`） |
+| `GET` | `/api/conversations/search` | 搜索对话（`?q=关键词`） |
 | `PATCH` | `/api/conversations/<id>` | 重命名对话（请求体：`{"title": "..."}`） |
 | `GET` | `/api/conversations/<id>/messages` | 获取对话消息（支持分页 `?limit=50&before=<msg_id>`） |
 | `DELETE` | `/api/conversations/<id>` | 删除对话 |
 | `GET` | `/api/conversations/<id>/stats` | 获取对话 Token 统计 |
+| `GET` | `/api/stats/token-usage` | 全局 Token 用量统计（仪表盘数据源，支持 `?range=today/week/month/all`） |
 
 #### 对话模板
 
@@ -536,7 +597,8 @@ pytest tests/ -v -s
 |------|------|------|
 | `GET` | `/api/webhooks` | 获取所有 Webhook 配置 |
 | `POST` | `/api/webhooks` | 注册 Webhook |
-| `DELETE` | `/api/webhooks/<id>` | 删除 Webhook |
+| `GET` | `/api/webhooks/<conversation_id>` | 获取指定对话的 Webhook 配置 |
+| `DELETE` | `/api/webhooks/<conversation_id>` | 删除指定对话的 Webhook |
 | `POST` | `/api/webhooks/trigger` | 入站触发对话 |
 
 #### 结果验证
@@ -551,8 +613,8 @@ pytest tests/ -v -s
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/config/tools` | 获取工具开关状态 |
-| `POST` | `/api/config/tools` | 更新工具开关 |
+| `GET` | `/api/config/tools` | 获取工具开关状态（`knowledge_search` / `code_index`） |
+| `POST` | `/api/config/tools` | 更新工具开关（**仅管理员**；改的是进程级全局配置，对所有用户生效） |
 
 #### 分享与导出
 
@@ -590,6 +652,7 @@ pytest tests/ -v -s
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/api/upload/image` | 上传图片（多模态） |
+| `POST` | `/api/upload/file` | 上传文件（知识库文档，随对话上传） |
 | `POST` | `/api/messages/<msg_id>/feedback` | 提交消息反馈 |
 
 #### 消息编辑与删除
@@ -639,17 +702,19 @@ pytest tests/ -v -s
 | `join` | → 服务端 | 加入对话房间（同时触发断线生成恢复检测） |
 | `leave` | → 服务端 | 离开对话房间 |
 | `stop_generation` | → 服务端 | 打断生成 |
+| `connected` | ← 客户端 | 连接已建立（返回 `sid`、用户名） |
 | `message_created` | ← 客户端 | 消息已创建，返回 `message_id` |
 | `token` | ← 客户端 | 接收增量文本片段 |
 | `tool_calls` | ← 客户端 | 接收工具调用记录 |
 | `content_reset` | ← 客户端 | 工具调用完成、开启下一轮答案前清空引导性正文 |
+| `verifying` | ← 客户端 | 结果验证开始 |
+| `verified` | ← 客户端 | 结果验证完成 |
 | `generation_completed` | ← 客户端 | AI 回复完成 |
 | `generation_stopped` | ← 客户端 | 生成被中断 |
 | `generation_error` | ← 客户端 | 生成失败 |
 | `generation_resume` | ← 客户端 | 断线重连后恢复正在生成的内容 |
 | `index_progress` | ← 客户端 | 代码索引构建进度 |
-| `leave` | → 服务端 | 离开对话房间 |
-| `index_progress` | ← 客户端 | 接收代码索引构建进度 |
+| `error` | ← 客户端 | 错误提示（如缺少必要参数） |
 
 ---
 
@@ -672,6 +737,7 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 - **Tool Calling** — Three-tier unified dispatch: built-in tools, Skill plugins (hot-reloadable Python modules with namespace isolation), and MCP protocol (stdio/SSE external servers with automatic tool discovery)
 - **Tool Reliability** — 30s per-execution timeout (`ThreadPoolExecutor`), circuit breaker after 5 consecutive failures (60s cooldown), and a 10-round cap on tool-call loops (tools are withdrawn at the cap so the model must summarize with what it has)
 - **MCP Server Management UI** — Inspect connection status, tool lists, ownership scope (global / mine) and source (config file / UI) in the sidebar; add, update, enable/disable, reconnect and remove servers at runtime. Configs persist in the database and auto-recover after restart; admins can register global servers while users may register their own (isolated per user, visible only to the owner)
+- **MCP Authorization & Validation** — `stdio` is admin-only while `sse` can be opened to regular users via a config flag; `sse` URLs are validated, with a host allowlist supported; servers connect in the background without blocking startup
 - **Message Queueing** — Keep sending messages while the AI is replying; queued messages appear as cards above the input box with edit (recall into input) and cancel actions, and are dispatched automatically in order
 - **Message Edit & Delete** — Hover a user message to edit (regenerates the AI reply) or delete (removes that message and everything after it)
 - **Multimodal Image Understanding** — Upload via button, Ctrl+V paste, or drag-and-drop; thumbnails render in chat bubbles with click-to-enlarge
@@ -695,16 +761,16 @@ Flask Chat is an AI-powered chat application built with Flask. It supports multi
 | ORM | Flask-SQLAlchemy (hand-written SQL migrations) |
 | Database | PostgreSQL + pgvector |
 | Auth | PyJWT (JWT token; WebSocket is JWT-authenticated too) |
-| Cache / Rate limit | In-memory / Redis (dual-mode, switchable) |
+| Cache | In-memory / Redis (dual-mode, switchable) |
 | LLM Interface | OpenAI SDK (any OpenAI-protocol service; currently a Volcengine gateway) |
 | Embedding Model | Ollama (qwen3-embedding:8b, 4096-dim) or third-party embedding service |
 | Vector Search | pgvector (cosine recall + BM25 reranking) |
 | RAG / Code Index | LlamaIndex + CodeSplitter (tree-sitter) + PGVectorStore |
 | File Parsing | pypdf, python-docx |
-| Tool Extension | MCP SDK (stdio/SSE) + in-house Skill plugins (importlib hot-reload) |
-| Observability | LangSmith (`@traceable` decorator + env vars) |
-| Security | JWT auth, API key auth, Prompt Injection filtering, path whitelisting, secret sanitization, user-level isolation |
-| Reliability | Tool timeout (ThreadPoolExecutor) + circuit breaker, model retry & fallback, startup self-healing |
+| Tool Extension | MCP SDK 2.x (stdio/SSE) + in-house Skill plugins (importlib hot-reload) |
+| Observability | LangSmith (`@traceable` decorator + env vars), built-in metrics (`/api/metrics`) |
+| Security | JWT auth, API key auth, Prompt Injection filtering, code-repo path whitelisting (realpath normalization), SSRF validation for MCP SSE URLs, secret sanitization, user-level isolation, MCP transport authorization |
+| Reliability | Tool timeout (ThreadPoolExecutor) + circuit breaker, model retry & fallback, startup self-healing, async MCP initialization |
 | Containerization | Docker + docker-compose |
 | Frontend | Vanilla HTML / CSS / JavaScript (IIFE + marked.js, no build step) |
 
@@ -721,7 +787,7 @@ python run.py           # Visit http://localhost:8080
 Or with Docker:
 
 ```bash
-docker-compose up -d
+docker-compose up -d    # exposes port 5000 (local run.py uses 8080)
 ```
 
 See the Chinese section above for full configuration details.
@@ -731,6 +797,10 @@ See the Chinese section above for full configuration details.
 ```bash
 pytest tests/ -v
 ```
+
+> Tests require a dedicated PostgreSQL database whose name ends in `_test`
+> (set via `TEST_DATABASE_URL`, or derived from `DATABASE_URL`). MCP-related
+> tests neither spawn subprocesses nor make network requests.
 
 ### WebSocket Events
 

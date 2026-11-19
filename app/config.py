@@ -82,14 +82,12 @@ class Config:
     CODE_INDEX_ENABLED = os.getenv("CODE_INDEX_ENABLED", "false").lower() == "true"
 
     # Code Editor (代码编辑工具 - AI 可直接读写代码文件)
-    CODE_EDIT_ENABLED = os.getenv("CODE_EDIT_ENABLED", "false").lower() == "true"
     CODE_EDIT_SHELL_TIMEOUT = int(os.getenv("CODE_EDIT_SHELL_TIMEOUT", "30"))
     CODE_INDEX_DB_HOST = os.getenv("CODE_INDEX_DB_HOST", "localhost")
     CODE_INDEX_DB_PORT = int(os.getenv("CODE_INDEX_DB_PORT", "5432"))
     CODE_INDEX_DB_USER = os.getenv("CODE_INDEX_DB_USER", "postgres")
     CODE_INDEX_DB_PASSWORD = os.getenv("CODE_INDEX_DB_PASSWORD", "postgres")
     CODE_INDEX_DB_NAME = os.getenv("CODE_INDEX_DB_NAME", "postgres")
-    CODE_INDEX_DEFAULT_REPO = os.getenv("CODE_INDEX_DEFAULT_REPO", "flask_chat")
     CODE_INDEX_TOP_K = int(os.getenv("CODE_INDEX_TOP_K", "5"))
 
     # Code Index Builder (索引构建配置)
