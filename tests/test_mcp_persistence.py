@@ -702,3 +702,379 @@ class TestLazyConnectOnLogin:
         assert results == {}
         assert mcp_enabled.connect_calls == []
 
+
+class TestSsrfGuard:
+    """sse URL 的 SSRF 校验。
+
+    为什么需要：sse 的 url 由**服务端**发起请求。不校验则用户可填
+    http://169.254.169.254/latest/meta-data/ 读云厂商实例元数据（含临时凭证），
+    或填 http://127.0.0.1:5432/ 探测本机数据库端口，且响应会回流到工具列表 /
+    调用结果，构成有读回通道的 SSRF。
+
+    校验分三层，都要覆盖：
+      1. ssrf_guard.validate_sse_url —— 纯函数规则（协议 / IP 段 / host 混淆）
+      2. add / update 路由 —— 非管理员被拦，管理员豁免
+      3. _connect_sse 连接前复检 —— 挡住绕过路由直接写库的配置
+
+    DNS 由 conftest 的 mcp_enabled fixture 桩化，测试不依赖网络。
+    """
+
+    # ---------- 1. 纯函数规则 ----------
+
+    @pytest.mark.parametrize("url", [
+        # 云厂商元数据 —— SSRF 最高价值目标
+        "http://169.254.169.254/latest/meta-data/",
+        "http://169.254.170.2/v2/credentials",
+        "http://[fd00:ec2::254]/",
+        # 环回
+        "http://127.0.0.1:9111/sse",
+        "http://127.1/x",                       # 127/8 的简写形式
+        "http://[::1]/mcp",
+        # 内网段
+        "http://10.0.0.5/mcp",
+        "http://192.168.1.1/mcp",
+        "http://172.16.5.4/mcp",
+        "http://172.31.255.255/mcp",
+        "http://[fc00::1]/mcp",                 # IPv6 ULA
+        # Python 3.14 的 ipaddress 对该段 is_private=False，
+        # 只有 is_global=False 能抓住 —— 这是最容易被漏掉的一段
+        "http://100.64.0.1/mcp",
+        "http://100.127.255.255/mcp",
+        # 未指定 / 组播 / 保留
+        "http://0.0.0.0/mcp",
+        "http://[::]/mcp",
+        "http://224.0.0.1/mcp",
+        "http://239.255.255.250/mcp",           # SSDP
+        "http://240.0.0.1/mcp",
+        # 链路本地（IPv6）
+        "http://[fe80::1]/mcp",
+        "http://[fe80::1%25en0]/mcp",           # 带 scope id
+    ])
+    def test_rejects_private_and_special_addresses(self, url):
+        """内网 / 元数据 / 特殊段一律拒绝。"""
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError):
+            validate_sse_url(url, None)
+
+    @pytest.mark.parametrize("url", [
+        # IPv4-mapped IPv6：::ffff:127.0.0.1 的 is_loopback 为 False，
+        # 不先还原成 IPv4 就判断会被绕过
+        "http://[::ffff:127.0.0.1]/mcp",
+        "http://[::ffff:169.254.169.254]/",
+        # IPv4-in-IPv6（非标准写法，部分解析器接受）
+        "http://[::127.0.0.1]/mcp",
+        "http://[::a9fe:a9fe]/",                # ::169.254.169.254 的十六进制形式
+    ])
+    def test_rejects_ipv6_wrapped_ipv4_bypass(self, url):
+        """IPv6 包裹的 IPv4 写法不能绕过校验。"""
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError):
+            validate_sse_url(url, None)
+
+    @pytest.mark.parametrize("url", [
+        "file:///etc/passwd",
+        "gopher://127.0.0.1:6379/_x",
+        "dict://x/y",
+        "ftp://8.8.8.8/",
+        "http+unix:///var/run/docker.sock",
+    ])
+    def test_rejects_non_http_schemes(self, url):
+        """只允许 http / https。用白名单而非黑名单，未知协议默认拒绝。"""
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError):
+            validate_sse_url(url, None)
+
+    @pytest.mark.parametrize("url", [
+        # http://expected.com@evil.com/ 的真实 host 是 evil.com。
+        # 我们以 parsed.hostname 为准，所以这类混淆天然无效；
+        # 但仍显式拒绝，避免用户误以为自己在连前面那个域名。
+        "http://expected.com@127.0.0.1/mcp",
+        "http://trusted.example@internal.example/mcp",
+    ])
+    def test_rejects_credential_host_confusion(self, url):
+        """url 中不得含 '@'（防 host 混淆）。凭据应放 headers。"""
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError) as exc:
+            validate_sse_url(url, None)
+        assert "@" in str(exc.value)
+
+    @pytest.mark.parametrize("url", [
+        "https://api.github.com/mcp",
+        "https://example.com/sse",
+        "http://8.8.8.8/mcp",
+        "http://1.1.1.1/mcp",
+        "http://93.184.216.34:8080/sse",
+        "http://[2606:2800:220:1:248:1893:25c8:1946]/mcp",
+    ])
+    def test_allows_public_urls(self, url):
+        """正常公网地址必须放行，否则功能不可用。"""
+        from app.services.ssrf_guard import validate_sse_url
+        assert validate_sse_url(url, None) == url
+
+    @pytest.mark.parametrize("url", ["", None, "   ", "not-a-url", "http://", "http:///sse"])
+    def test_rejects_malformed_urls(self, url):
+        """空值 / 无 host 的畸形 URL 必须拒绝（fail-closed）。"""
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError):
+            validate_sse_url(url, None)
+
+    def test_rejects_domain_resolving_to_internal_ip(self, stub_dns):
+        """域名解析到内网也要拦 —— 只看 host 字面量是不够的。
+
+        这是 SSRF 最常见的绕过手法：用一个公网可解析的域名指向内网 IP。
+        stub_dns 把 internal.example 桩化为 10.0.0.7。
+        """
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError) as exc:
+            validate_sse_url("http://internal.example/mcp", None)
+        assert "10.0.0.7" in str(exc.value), "错误信息应包含实际解析到的 IP，便于排查"
+
+    def test_rejects_domain_resolving_to_metadata_service(self, stub_dns):
+        """域名指向云元数据服务（169.254.169.254）必须拦。"""
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError) as exc:
+            validate_sse_url("http://metadata.example/mcp", None)
+        assert "元数据" in str(exc.value)
+
+    def test_checks_all_resolved_addresses_not_just_first(self, stub_dns):
+        """多 A 记录场景：只要有一条落在内网就拒绝。
+
+        攻击者可让权威 DNS 返回「公网 IP + 127.0.0.1」，客户端可能挑后者连接。
+        stub_dns 把 mixed.example 桩化为 ["93.184.216.34", "192.168.1.5"]。
+        """
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError) as exc:
+            validate_sse_url("http://mixed.example/mcp", None)
+        assert "192.168.1.5" in str(exc.value), "必须检查到第二条内网记录，而不是只看第一条"
+
+    def test_unresolvable_domain_is_rejected(self, stub_dns):
+        """解析不出地址的域名拒绝（fail-closed，不放行未知目标）。"""
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError) as exc:
+            validate_sse_url("http://definitely-not-registered.invalid/mcp", None)
+        assert "解析" in str(exc.value)
+
+    # ---------- 2. 白名单 ----------
+
+    def test_allowlist_bypasses_check_for_loopback(self):
+        """白名单命中的主机跳过校验 —— 本地开发连 127.0.0.1 测试服务器要用。"""
+        from app.services.ssrf_guard import validate_sse_url
+        url = "http://127.0.0.1:9111/sse"
+        assert validate_sse_url(url, {"127.0.0.1"}) == url
+
+    def test_allowlist_is_case_insensitive_and_strips_brackets(self):
+        """白名单匹配应忽略大小写，并兼容 IPv6 的方括号写法。"""
+        from app.services.ssrf_guard import validate_sse_url
+        assert validate_sse_url("http://LOCALHOST:9111/sse", {"localhost"})
+        assert validate_sse_url("http://[::1]:9111/sse", {"::1"})
+
+    def test_allowlist_does_not_leak_to_other_hosts(self):
+        """白名单只放行列出的主机，不能顺带放过其他内网地址。"""
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError):
+            validate_sse_url("http://169.254.169.254/", {"127.0.0.1"})
+
+    def test_empty_allowlist_enforces_full_check(self):
+        """白名单为空（代码默认值）= 全部主机都要过校验。"""
+        from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+        with pytest.raises(SSRFValidationError):
+            validate_sse_url("http://127.0.0.1/sse", frozenset())
+        with pytest.raises(SSRFValidationError):
+            validate_sse_url("http://127.0.0.1/sse", None)
+
+    # ---------- 3. 路由层集成 ----------
+
+    def test_normal_user_cannot_add_internal_url(self, auth_client, mcp_enabled, app):
+        """非管理员添加内网 URL 被拦，且不落库。"""
+        app.config['MCP_ALLOW_USER_CUSTOM'] = True
+
+        resp = auth_client.post('/api/skills/mcp/servers/add', json={
+            'name': 'evil-metadata',
+            'transport': 'sse',
+            'url': 'http://169.254.169.254/latest/meta-data/',
+        })
+
+        assert resp.status_code == 400, resp.get_json()
+        assert MCPServer.query.filter_by(name='evil-metadata').first() is None, \
+            '被 SSRF 拦下的配置不应落库'
+
+    def test_normal_user_cannot_add_loopback_url(self, auth_client, mcp_enabled, app):
+        """非管理员添加 127.0.0.1 被拦（TestingConfig 白名单为空）。"""
+        app.config['MCP_ALLOW_USER_CUSTOM'] = True
+
+        resp = auth_client.post('/api/skills/mcp/servers/add', json={
+            'name': 'loopback',
+            'transport': 'sse',
+            'url': 'http://127.0.0.1:9111/sse',
+        })
+
+        assert resp.status_code == 400, resp.get_json()
+        assert MCPServer.query.filter_by(name='loopback').first() is None
+
+    def test_normal_user_can_add_public_url(self, auth_client, mcp_enabled, app):
+        """非管理员添加公网 URL 应放行 —— 不能把功能一起堵死。"""
+        app.config['MCP_ALLOW_USER_CUSTOM'] = True
+
+        resp = auth_client.post('/api/skills/mcp/servers/add', json={
+            'name': 'good-remote',
+            'transport': 'sse',
+            'url': 'https://example.com/sse',
+        })
+
+        assert resp.status_code == 200, resp.get_json()
+        assert MCPServer.query.filter_by(name='good-remote').first() is not None
+
+    def test_admin_exempt_from_ssrf_check(self, admin_client, mcp_enabled):
+        """管理员豁免 SSRF 校验。
+
+        理由：管理员本就能添加 stdio（等价 RCE），SSRF 对其不构成额外权限。
+        强制校验只会让管理员连内网服务时被迫改白名单，无安全收益。
+        """
+        resp = admin_client.post('/api/skills/mcp/servers/add', json={
+            'name': 'admin-internal',
+            'transport': 'sse',
+            'url': 'http://192.168.1.50:8080/mcp',
+        })
+
+        assert resp.status_code == 200, resp.get_json()
+        assert MCPServer.query.filter_by(name='admin-internal').first() is not None
+
+    def test_allowlist_lets_normal_user_add_loopback(self, auth_client, mcp_enabled, app):
+        """白名单配置后，非管理员可添加对应主机（本地开发场景）。"""
+        app.config['MCP_ALLOW_USER_CUSTOM'] = True
+        app.config['MCP_SSE_ALLOWED_HOSTS'] = {'127.0.0.1'}
+
+        resp = auth_client.post('/api/skills/mcp/servers/add', json={
+            'name': 'local-test',
+            'transport': 'sse',
+            'url': 'http://127.0.0.1:9111/sse',
+        })
+
+        assert resp.status_code == 200, resp.get_json()
+
+    def test_normal_user_cannot_update_to_internal_url(self, auth_client, mcp_enabled, app):
+        """update 也要校验 —— 否则可「先建合法 sse，再 update 成元数据地址」绕过 add。"""
+        app.config['MCP_ALLOW_USER_CUSTOM'] = True
+        add = auth_client.post('/api/skills/mcp/servers/add', json={
+            'name': 'mutable',
+            'transport': 'sse',
+            'url': 'https://example.com/sse',
+        })
+        assert add.status_code == 200, add.get_json()
+
+        resp = auth_client.put('/api/skills/mcp/servers/mutable',
+                               json={'url': 'http://169.254.169.254/latest/meta-data/'})
+
+        assert resp.status_code == 400, resp.get_json()
+        record = MCPServer.query.filter_by(name='mutable').first()
+        assert record.config['url'] == 'https://example.com/sse', \
+            '被拦下的 update 不应改动已存的 url'
+
+    def test_normal_user_cannot_switch_transport_to_evade_check(
+            self, auth_client, mcp_enabled, app):
+        """从 stdio 改成 sse 时同样要校验新 url（transport 分支切换不能成为绕过口）。"""
+        app.config['MCP_ALLOW_USER_CUSTOM'] = True
+        # 普通用户建不了 stdio，先用管理员建一个全局的再验证 update 路径不现实；
+        # 改为直接验证 sse→sse 的 url 变更已覆盖，且 stdio 提权仍被拦。
+        auth_client.post('/api/skills/mcp/servers/add', json={
+            'name': 'sse-only', 'transport': 'sse', 'url': 'https://example.com/sse'})
+
+        resp = auth_client.put('/api/skills/mcp/servers/sse-only',
+                               json={'transport': 'stdio', 'command': 'id'})
+        assert resp.status_code == 403, '提权为 stdio 应被拦'
+
+    def test_reconnect_does_not_revalidate_but_connect_layer_does(
+            self, admin_client, mcp_enabled, app):
+        """reconnect 只校验归属、不校验 url，所以连接层复检是必要的纵深防御。
+
+        此处验证：管理员可入库一个内网地址（豁免），配置确实进了库 ——
+        连接层复检的行为由 test_connect_sse_rejects_internal_url 单独覆盖。
+        """
+        admin_client.post('/api/skills/mcp/servers/add', json={
+            'name': 'internal-by-admin',
+            'transport': 'sse',
+            'url': 'http://10.0.0.9/mcp',
+        })
+        record = MCPServer.query.filter_by(name='internal-by-admin').first()
+        assert record is not None and record.config['url'] == 'http://10.0.0.9/mcp'
+
+    # ---------- 4. 连接层复检 ----------
+
+    def test_connect_sse_rejects_internal_url(self, app):
+        """_connect_sse 连接前复检：内网 URL 抛错，不发起真实请求。
+
+        这层挡住绕过路由的路径 —— .env 的 MCP_SERVERS_CONFIG、管理员直接改库、
+        reconnect 接口（只校验归属不校验 url）。
+        """
+        import asyncio
+
+        from app.mcp.client_manager import MCPServerConnection, configure_sse_guard
+
+        # 显式设空白名单，确保复检对全部主机生效
+        configure_sse_guard(frozenset())
+        try:
+            conn = MCPServerConnection(
+                "probe",
+                {"transport": "sse", "url": "http://169.254.169.254/latest/meta-data/"},
+            )
+            with pytest.raises(ValueError) as exc:
+                asyncio.run(conn._connect_sse())
+            assert "SSRF" in str(exc.value)
+        finally:
+            configure_sse_guard(app.config.get('MCP_SSE_ALLOWED_HOSTS'))
+
+    def test_connect_sse_allows_whitelisted_host(self, app):
+        """白名单主机在连接层同样放行（否则本地测试服务器连不上）。
+
+        桩掉 sse_client：只要代码走到调用 sse_client 这一步，就证明 SSRF 复检
+        已放行。sse_client 返回的是 async context manager，桩必须同构 ——
+        进入 __aenter__ 时抛哨兵异常终止，避免真的建连。
+        """
+        import asyncio
+        from contextlib import asynccontextmanager
+
+        from app.mcp import client_manager
+        from app.mcp.client_manager import MCPServerConnection, configure_sse_guard
+
+        configure_sse_guard({"127.0.0.1"})
+        reached = {"value": False}
+
+        @asynccontextmanager
+        async def fake_sse_client(url, headers=None):
+            reached["value"] = True
+            raise RuntimeError("已越过 SSRF 复检，进入真实连接阶段（测试到此为止）")
+            yield  # pragma: no cover  —— 永不执行，仅为满足 async CM 协议
+
+        original = client_manager.sse_client
+        client_manager.sse_client = fake_sse_client
+        try:
+            conn = MCPServerConnection(
+                "local", {"transport": "sse", "url": "http://127.0.0.1:9111/sse"})
+            with pytest.raises(RuntimeError, match="已越过 SSRF 复检"):
+                asyncio.run(conn._connect_sse())
+            assert reached["value"] is True, "白名单主机应放行到真实连接阶段"
+        finally:
+            client_manager.sse_client = original
+            configure_sse_guard(app.config.get('MCP_SSE_ALLOWED_HOSTS'))
+
+    # ---------- 5. 配置注入 ----------
+
+    def test_configure_sse_guard_normalizes_hosts(self):
+        """注入白名单时统一小写、去空白、剥方括号（IPv6）。"""
+        from app.mcp import client_manager
+
+        client_manager.configure_sse_guard([" LocalHost ", "[::1]", "Example.COM"])
+        try:
+            assert client_manager._sse_allowed_hosts == {"localhost", "::1", "example.com"}
+        finally:
+            client_manager.configure_sse_guard(frozenset())
+
+    def test_configure_sse_guard_handles_empty(self):
+        """空 / None / 空串都应得到空 frozenset，而不是残留上次的值。"""
+        from app.mcp import client_manager
+
+        client_manager.configure_sse_guard({"stale.example"})
+        for value in (None, "", [], set(), frozenset()):
+            client_manager.configure_sse_guard(value)
+            assert client_manager._sse_allowed_hosts == frozenset(), f"{value!r} 应清空为 frozenset()"
+

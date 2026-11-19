@@ -27,6 +27,29 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+# sse URL 的主机白名单（来自 config.MCP_SSE_ALLOWED_HOSTS）。
+# 模块级而非 current_app：_connect_sse 运行在 MCP 专用事件循环线程上，
+# 该线程没有 Flask app context，读 current_app 必然 RuntimeError。
+# 由 create_app() 调用 configure_sse_guard() 注入，进程内全局生效。
+_sse_allowed_hosts: Optional[frozenset] = None
+
+
+def configure_sse_guard(allowed_hosts) -> None:
+    """注入 sse SSRF 白名单配置。应在 create_app() 中调用一次。
+
+    Args:
+        allowed_hosts: 可迭代的主机名集合（set/frozenset/list），None 表示空白名单。
+    """
+    global _sse_allowed_hosts
+    if not allowed_hosts:
+        _sse_allowed_hosts = frozenset()
+    else:
+        _sse_allowed_hosts = frozenset(
+            str(h).strip().lower().strip("[]") for h in allowed_hosts if str(h).strip()
+        )
+    logger.info(f"MCP sse SSRF 白名单已配置: {sorted(_sse_allowed_hosts) or '（空，全部主机都校验）'}")
+
+
 def _get_or_create_event_loop():
     """获取当前线程的事件循环，没有则创建"""
     try:
@@ -145,6 +168,25 @@ class MCPServerConnection:
 
         if not url:
             raise ValueError("sse transport requires 'url' parameter")
+
+        # 纵深防御：连接前复检 SSRF。
+        # 路由层已校验过，但这里的配置还可能来自：
+        #   - .env 的 MCP_SERVERS_CONFIG（不经过路由）
+        #   - 管理员直接改数据库
+        #   - reconnect 接口（只校验归属，不校验 url）
+        # 复检可把 DNS rebinding 的时间窗从「添加时」压缩到「连接时」。
+        # ⚠️ 仍不能彻底消除 rebinding —— sse_client 内部会再解析一次 DNS，
+        #    且其 httpx_client_factory 不支持注入 transport，无法 pin IP。
+        #    需要硬保证时用 MCP_SSE_ALLOWED_HOSTS 白名单。
+        #
+        # 白名单用模块级变量而非 current_app：本方法运行在 MCP 专用事件循环
+        # 线程上，没有 Flask app context，读 current_app 必然抛 RuntimeError。
+        try:
+            from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
+            validate_sse_url(url, _sse_allowed_hosts)
+        except SSRFValidationError as e:
+            logger.error(f"拒绝连接 MCP 服务器 {self.name}：SSRF 校验未通过 - {e}")
+            raise ValueError(f"URL 未通过 SSRF 校验: {e}") from e
 
         # 使用 async with 自动管理上下文
         async with sse_client(url, headers=headers) as (read_stream, write_stream):

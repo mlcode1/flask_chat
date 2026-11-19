@@ -220,6 +220,7 @@ import re
 from flask import current_app, g
 from app.services.auth_service import get_current_user, login_required
 from app.services import mcp_service
+from app.services.ssrf_guard import SSRFValidationError, validate_sse_url
 from app.models import MCPServer
 
 # 服务器名会成为工具名前缀（{server}__{tool}），必须限制字符集
@@ -277,6 +278,29 @@ def _check_add_permission(user, transport):
     if not current_app.config.get('MCP_ALLOW_USER_CUSTOM', False):
         return '当前部署未开放用户自助添加 MCP 服务器，请联系管理员'
 
+    return None
+
+
+def _check_sse_url(url):
+    """SSRF 校验 sse URL。返回错误信息，合法则返回 None。
+
+    为什么需要：sse 的 url 由**服务端**发起请求，不校验就是 SSRF ——
+    用户可填 http://169.254.169.254/latest/meta-data/ 读云厂商实例元数据
+    （含临时凭证），或填 http://127.0.0.1:5432/ 探测本机数据库端口，
+    且响应会回流到工具列表/调用结果，构成有读回通道的 SSRF。
+
+    白名单（MCP_SSE_ALLOWED_HOSTS）命中的主机跳过校验，用于本地开发连
+    127.0.0.1 测试服务器；详见 app/services/ssrf_guard.py。
+    """
+    try:
+        validate_sse_url(url, current_app.config.get('MCP_SSE_ALLOWED_HOSTS'))
+    except SSRFValidationError as e:
+        logger.warning(f"拒绝 MCP sse URL（SSRF 校验未通过）: {e}")
+        return str(e)
+    except Exception as e:
+        # fail-closed：校验逻辑自身出错时拒绝，而不是放行
+        logger.error(f"SSRF 校验异常，按拒绝处理: {e}", exc_info=True)
+        return f'URL 校验失败（{type(e).__name__}），请检查后重试'
     return None
 
 
@@ -423,6 +447,13 @@ def add_mcp_server():
     else:
         if not data.get('url'):
             return jsonify({'success': False, 'error': 'sse 类型必须提供 url'}), 400
+        # SSRF 校验：url 由**服务端**发起请求，必须确认目标不是内网/元数据地址。
+        # 管理员豁免 —— 管理员本就能添加 stdio（等价 RCE），SSRF 对其不构成
+        # 额外权限；强制校验只会让管理员连内网服务时被迫去改白名单，无安全收益。
+        if not user.is_admin:
+            url_err = _check_sse_url(data.get('url'))
+            if url_err:
+                return jsonify({'success': False, 'error': url_err}), 400
 
     manager = get_mcp_manager()
     if manager is None:
@@ -716,6 +747,14 @@ def update_mcp_server(server_name):
         return jsonify({'success': False, 'error': 'stdio 类型必须提供 command'}), 400
     if new_transport == 'sse' and not new_config.get('url'):
         return jsonify({'success': False, 'error': 'sse 类型必须提供 url'}), 400
+
+    # SSRF 校验：update 同样要过 —— 否则非管理员可「先建一个合法 sse，
+    # 再 update 成 169.254.169.254」绕过 add 的校验。
+    # 管理员豁免，理由同 add（其已持有 stdio = RCE，SSRF 不构成额外权限）。
+    if new_transport == 'sse' and not is_admin:
+        url_err = _check_sse_url(new_config.get('url'))
+        if url_err:
+            return jsonify({'success': False, 'error': url_err}), 400
 
     manager = get_mcp_manager()
 

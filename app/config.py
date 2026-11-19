@@ -119,6 +119,20 @@ class Config:
     #    stdio 会 spawn 任意本地进程（等价 RCE），始终仅管理员可添加。
     MCP_ALLOW_USER_CUSTOM = os.getenv("MCP_ALLOW_USER_CUSTOM", "false").lower() == "true"
 
+    # sse URL 的主机白名单（逗号分隔，小写，不含端口）。
+    # 命中的主机跳过 SSRF 校验 —— 用于两类场景：
+    #   1. 本地开发时允许 127.0.0.1（否则会被 SSRF 校验拦下）
+    #   2. 需要连接内网服务，或对抗 DNS rebinding（白名单是唯一可靠手段，
+    #      因为 mcp 的 sse_client 无法 pin 住已校验的解析结果）
+    # ⚠️ 默认**空**：安全默认，SSRF 校验对全部主机生效。
+    #    本地开发请在 .env 里填 MCP_SSE_ALLOWED_HOSTS=127.0.0.1,localhost。
+    #    注意白名单是"跳过校验"，填了内网主机就等于允许连内网，请只列可信主机。
+    MCP_SSE_ALLOWED_HOSTS = {
+        h.strip().lower().strip("[]")
+        for h in os.getenv("MCP_SSE_ALLOWED_HOSTS", "").split(",")
+        if h.strip()
+    }
+
     # Logging (结构化日志)
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FORMAT = os.getenv("LOG_FORMAT", "human")  # 'human' or 'json'
@@ -168,6 +182,11 @@ class TestingConfig(Config):
     MCP_ENABLED = False          # 避免测试时拉起 uvx/npx 子进程
     SKILLS_ENABLED = False       # 避免加载本地插件
     CACHE_ENABLED = False        # 避免缓存干扰断言
+
+    # 固定为空，不继承 .env —— 否则开发机 .env 里若填了
+    # MCP_SSE_ALLOWED_HOSTS=127.0.0.1,localhost，测试就会因白名单命中而
+    # 放行本该被 SSRF 校验拦下的地址，断言随本地配置漂移。
+    MCP_SSE_ALLOWED_HOSTS = frozenset()
 
     # 生产库名，供 conftest 做最后一道保险校验
     PRODUCTION_DATABASE_NAME = (

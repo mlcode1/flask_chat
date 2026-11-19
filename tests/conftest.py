@@ -120,6 +120,7 @@ def _restore_global_config(app):
         "AI_DISCLAIMER_TEXT",
         "MCP_ENABLED",
         "MCP_ALLOW_USER_CUSTOM",
+        "MCP_SSE_ALLOWED_HOSTS",
         "SKILLS_ENABLED",
     )
     with app.app_context():
@@ -263,7 +264,51 @@ def temp_dir():
 
 
 @pytest.fixture(scope="function")
-def mcp_enabled(app, db, monkeypatch):
+def stub_dns(monkeypatch):
+    """桩化 SSRF 校验的 DNS 解析，让测试完全确定、不依赖网络。
+
+    真实解析有两个问题：
+      ① 测试依赖网络，离线环境会集体失败；
+      ② 结果随 DNS 变化漂移（example.com 可能解析到不同 IP 段），断言不稳定。
+
+    桩在 ssrf_guard._resolve_all_ips（模块级函数）而非 socket.getaddrinfo ——
+    那是 ssrf_guard 唯一做 DNS 的出口，且能直接返回 ipaddress 对象。
+
+    独立于 mcp_enabled：纯函数级测试（不经路由）也需要它。
+    """
+    import ipaddress
+    from app.services import ssrf_guard
+
+    table = {
+        "example.com": "93.184.216.34",     # 公网 IP → 应放行
+        "my.example": "93.184.216.34",
+        "g.example": "93.184.216.34",
+        "o.example": "93.184.216.34",
+        "t.com": "93.184.216.34",
+        "g.com": "93.184.216.34",
+        "api.github.com": "140.82.112.5",
+        # 下面几个供用例显式验证「域名解析到内网」被拦
+        "internal.example": "10.0.0.7",
+        "metadata.example": "169.254.169.254",
+        "rebind.example": "127.0.0.1",
+        # 多记录场景：公网 + 内网混合，验证「检查全部记录而非第一条」
+        "mixed.example": ["93.184.216.34", "192.168.1.5"],
+    }
+
+    def fake_resolve(host, port=None):
+        host = (host or "").lower().strip("[]")
+        if host not in table:
+            raise ssrf_guard.SSRFValidationError(f"域名无法解析：{host}（测试桩：未登记）")
+        value = table[host]
+        ips = value if isinstance(value, list) else [value]
+        return [ipaddress.ip_address(x) for x in ips]
+
+    monkeypatch.setattr(ssrf_guard, "_resolve_all_ips", fake_resolve)
+    return table
+
+
+@pytest.fixture(scope="function")
+def mcp_enabled(app, db, monkeypatch, stub_dns):
     """启用 MCP 并把连接层替换为假实现。
 
     ⚠️ 必须 mock：本机已安装 mcp 库，真实的 ensure_connected_sync 会
@@ -271,6 +316,8 @@ def mcp_enabled(app, db, monkeypatch):
 
     同时把 MCP_ENABLED 置为 True —— TestingConfig 默认关闭，
     否则所有 MCP 路由会在开关检查处直接返回 400。
+
+    DNS 解析由 stub_dns fixture 桩化（见其 docstring）。
 
     返回一个控制器对象，可设置假连接的返回值与记录调用。
     """
