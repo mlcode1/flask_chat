@@ -1040,7 +1040,7 @@ class TestSsrfGuard:
         reached = {"value": False}
 
         @asynccontextmanager
-        async def fake_sse_client(url, headers=None):
+        async def fake_sse_client(url, headers=None, timeout=None, sse_read_timeout=None):
             reached["value"] = True
             raise RuntimeError("已越过 SSRF 复检，进入真实连接阶段（测试到此为止）")
             yield  # pragma: no cover  —— 永不执行，仅为满足 async CM 协议
@@ -1077,4 +1077,136 @@ class TestSsrfGuard:
         for value in (None, "", [], set(), frozenset()):
             client_manager.configure_sse_guard(value)
             assert client_manager._sse_allowed_hosts == frozenset(), f"{value!r} 应清空为 frozenset()"
+
+
+class TestConnectTimeout:
+    """连接超时与 sse 超时的回归防护。
+
+    覆盖两个此前的缺陷：
+      1. connect() 超时后只 return False，**不取消** connect_task。
+         _connect_stdio 内部是 `async with stdio_client(...)`，该上下文持有
+         npx/uvx 拉起的子进程；任务不取消 → 子进程变孤儿，反复重连会累积僵尸进程。
+      2. _connect_sse 调 sse_client 时未传 timeout，落回 mcp 默认的 **5s**
+         （已用 inspect.signature 实测确认），远端服务冷启动极易超时，
+         且异常被 anyio 包成 ExceptionGroup，日志里看不出是超时。
+    """
+
+    def test_timeout_cancels_connect_task(self, monkeypatch):
+        """核心断言：超时后 connect_task 必须被 cancel。"""
+        import asyncio
+        from app.mcp import client_manager
+        from app.mcp.client_manager import MCPServerConnection
+
+        entered = {"value": False}
+        cancelled = {"value": False}
+
+        async def slow_connect(self):
+            entered["value"] = True
+            try:
+                await asyncio.sleep(30)      # 远超超时，模拟 npx 卡死
+            except asyncio.CancelledError:
+                cancelled["value"] = True
+                raise                        # 必须重抛，否则 asyncio 认为任务未取消
+
+        monkeypatch.setattr(MCPServerConnection, "_connect_stdio", slow_connect)
+        monkeypatch.setattr(client_manager, "CONNECT_TIMEOUT_SECONDS", 0.3)
+        monkeypatch.setattr(client_manager, "MCP_AVAILABLE", True)
+
+        conn = MCPServerConnection("slow", {"transport": "stdio", "command": "echo"})
+        result = asyncio.run(conn.connect())
+
+        assert result is False, "超时应返回 False"
+        assert entered["value"] is True, "连接协程根本没启动，测试无意义"
+        assert cancelled["value"] is True, (
+            "超时后未取消 connect_task —— npx/uvx 子进程会泄漏成孤儿进程"
+        )
+        assert conn._connected is False
+        assert conn.session is None
+
+    def test_timeout_uses_configurable_constant(self, monkeypatch):
+        """超时上限来自 CONNECT_TIMEOUT_SECONDS，不再是硬编码的 range(300)。"""
+        import asyncio
+        import time
+        from app.mcp import client_manager
+        from app.mcp.client_manager import MCPServerConnection
+
+        async def never_ready(self):
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(MCPServerConnection, "_connect_stdio", never_ready)
+        monkeypatch.setattr(client_manager, "MCP_AVAILABLE", True)
+
+        # 改成 0.4s：若代码仍按硬编码 30s 轮询，这里会耗时远超 1s
+        monkeypatch.setattr(client_manager, "CONNECT_TIMEOUT_SECONDS", 0.4)
+        conn = MCPServerConnection("t", {"transport": "stdio", "command": "echo"})
+        t0 = time.time()
+        asyncio.run(conn.connect())
+        elapsed = time.time() - t0
+
+        assert elapsed < 2.0, (
+            f"耗时 {elapsed:.2f}s，说明超时上限没有读 CONNECT_TIMEOUT_SECONDS"
+        )
+
+    def test_sse_client_receives_explicit_timeouts(self, monkeypatch):
+        """sse_client 必须收到显式 timeout / sse_read_timeout。"""
+        import asyncio
+        from contextlib import asynccontextmanager
+        from app.mcp import client_manager
+        from app.mcp.client_manager import MCPServerConnection
+
+        captured = {}
+
+        @asynccontextmanager
+        async def fake_sse_client(url, headers=None, timeout=None, sse_read_timeout=None):
+            captured.update(
+                url=url, timeout=timeout, sse_read_timeout=sse_read_timeout,
+                headers=headers,
+            )
+            raise RuntimeError("已拿到参数，测试到此为止")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(client_manager, "sse_client", fake_sse_client)
+        client_manager.configure_sse_guard({"127.0.0.1"})   # 放行本地地址以走到建连
+        try:
+            conn = MCPServerConnection(
+                "t", {"transport": "sse", "url": "http://127.0.0.1:9111/sse"})
+            with pytest.raises(RuntimeError, match="已拿到参数"):
+                asyncio.run(conn._connect_sse())
+        finally:
+            client_manager.configure_sse_guard(frozenset())
+
+        assert captured["timeout"] is not None, (
+            "未传 timeout → 落回 mcp 默认 5s，远端冷启动会莫名超时"
+        )
+        assert captured["timeout"] == client_manager.SSE_HTTP_TIMEOUT_SECONDS
+        assert captured["sse_read_timeout"] == client_manager.SSE_READ_TIMEOUT_SECONDS
+        # 回归防护：绝不能把 HTTP 超时误设成 5s
+        assert captured["timeout"] > 5.0
+
+    def test_configure_mcp_timeouts_partial_update(self):
+        """注入函数：传 None 的参数必须保持原值，不能被清零。"""
+        from app.mcp import client_manager
+
+        original = (
+            client_manager.CONNECT_TIMEOUT_SECONDS,
+            client_manager.SSE_HTTP_TIMEOUT_SECONDS,
+            client_manager.SSE_READ_TIMEOUT_SECONDS,
+        )
+        try:
+            client_manager.configure_mcp_timeouts(connect=11, sse_http=22, sse_read=33)
+            assert client_manager.CONNECT_TIMEOUT_SECONDS == 11.0
+            assert client_manager.SSE_HTTP_TIMEOUT_SECONDS == 22.0
+            assert client_manager.SSE_READ_TIMEOUT_SECONDS == 33.0
+
+            # 只改一项，其余两项必须原样保留
+            client_manager.configure_mcp_timeouts(connect=44)
+            assert client_manager.CONNECT_TIMEOUT_SECONDS == 44.0
+            assert client_manager.SSE_HTTP_TIMEOUT_SECONDS == 22.0, "部分注入污染了 sse_http"
+            assert client_manager.SSE_READ_TIMEOUT_SECONDS == 33.0, "部分注入污染了 sse_read"
+
+            # 字符串也要能转成 float（config 可能来自 env）
+            client_manager.configure_mcp_timeouts(connect="7")
+            assert client_manager.CONNECT_TIMEOUT_SECONDS == 7.0
+        finally:
+            client_manager.configure_mcp_timeouts(*original)
 

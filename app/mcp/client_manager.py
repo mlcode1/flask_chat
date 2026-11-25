@@ -33,6 +33,42 @@ logger = logging.getLogger(__name__)
 # 由 create_app() 调用 configure_sse_guard() 注入，进程内全局生效。
 _sse_allowed_hosts: Optional[frozenset] = None
 
+# MCP 连接超时（秒）。同样是模块级 + 注入，原因同 _sse_allowed_hosts。
+#
+# connect() 原先把 30s 硬编码成 range(300) 次 0.1s 轮询，注释里写着"最多等待 30 秒"
+# 却没有任何常量承载这个语义，改起来要同时动注释和循环次数，极易失配。
+CONNECT_TIMEOUT_SECONDS = 30.0
+
+# sse_client 的 HTTP 超时。mcp 的默认值是 **5.0 秒**（实测 inspect.signature 确认），
+# 对远端 MCP 服务偏紧：握手慢于 5s 就失败，且异常被 anyio 包成 ExceptionGroup，
+# 日志里看不出是超时，排查成本很高。
+SSE_HTTP_TIMEOUT_SECONDS = 30.0
+
+# sse_client 的「等待下一个 SSE 事件」超时，mcp 默认 300s。
+# ⚠️ 这个不能设太短：它是**空闲连接**的存活上限，不是握手超时。
+# 一个空闲的 MCP 服务器在 300s 内没推任何事件就会被断开。
+SSE_READ_TIMEOUT_SECONDS = 300.0
+
+
+def configure_mcp_timeouts(connect=None, sse_http=None, sse_read=None) -> None:
+    """注入 MCP 超时配置。应在 create_app() 中、启动连接之前调用一次。
+
+    与 configure_sse_guard 同理：连接跑在 MCP 专用事件循环线程上，
+    那里读不到 Flask app context，只能靠模块级变量传配置。
+    传 None 的参数保持当前值，便于只覆盖其中一项。
+    """
+    global CONNECT_TIMEOUT_SECONDS, SSE_HTTP_TIMEOUT_SECONDS, SSE_READ_TIMEOUT_SECONDS
+    if connect is not None:
+        CONNECT_TIMEOUT_SECONDS = float(connect)
+    if sse_http is not None:
+        SSE_HTTP_TIMEOUT_SECONDS = float(sse_http)
+    if sse_read is not None:
+        SSE_READ_TIMEOUT_SECONDS = float(sse_read)
+    logger.info(
+        f"MCP 超时已配置: connect={CONNECT_TIMEOUT_SECONDS}s, "
+        f"sse_http={SSE_HTTP_TIMEOUT_SECONDS}s, sse_read={SSE_READ_TIMEOUT_SECONDS}s"
+    )
+
 
 def configure_sse_guard(allowed_hosts) -> None:
     """注入 sse SSRF 白名单配置。应在 create_app() 中调用一次。
@@ -107,8 +143,8 @@ class MCPServerConnection:
                 logger.error(f"Unsupported transport: {self.transport}")
                 return False
             
-            # 等待连接就绪（最多等待 30 秒）
-            for _ in range(300):
+            # 等待连接就绪（上限 CONNECT_TIMEOUT_SECONDS，按 0.1s 粒度轮询）
+            for _ in range(int(CONNECT_TIMEOUT_SECONDS / 0.1)):
                 if self._connected:
                     return True
                 if connect_task.done():
@@ -120,7 +156,29 @@ class MCPServerConnection:
                     return False
                 await asyncio.sleep(0.1)
             
-            logger.error(f"Timeout waiting for MCP server {self.name} to connect")
+            # ⚠️ 超时必须 cancel 任务，否则子进程泄漏。
+            # _connect_stdio / _connect_sse 内部是 `async with stdio_client(...)`，
+            # 那个上下文管理器持有 npx/uvx 拉起的子进程。只 return False 而留着
+            # 任务继续跑，子进程就成了孤儿 —— 反复重连会累积几十个僵尸进程
+            # （atexit 钩子只能兜住退出时还挂在 manager 上的连接，兜不住这种）。
+            #
+            # cancel 后必须 await，让 CancelledError 真正传播进去、触发
+            # async with 的 __aexit__ 去 kill 子进程。不 await 的话取消只是
+            # 「打了个标记」，我们却已经返回了，清理根本没发生。
+            logger.error(
+                f"Timeout waiting for MCP server {self.name} to connect "
+                f"({CONNECT_TIMEOUT_SECONDS}s)，取消连接任务以回收子进程"
+            )
+            connect_task.cancel()
+            try:
+                await connect_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                # 取消过程中底层可能抛出被包装的异常，记录但不影响返回结果
+                logger.warning(f"取消 {self.name} 连接任务时出现异常: {e}")
+            self._connected = False
+            self.session = None
             return False
             
         except Exception as e:
@@ -188,8 +246,22 @@ class MCPServerConnection:
             logger.error(f"拒绝连接 MCP 服务器 {self.name}：SSRF 校验未通过 - {e}")
             raise ValueError(f"URL 未通过 SSRF 校验: {e}") from e
 
-        # 使用 async with 自动管理上下文
-        async with sse_client(url, headers=headers) as (read_stream, write_stream):
+        # 使用 async with 自动管理上下文。
+        #
+        # ⚠️ 两个超时都必须显式传，不能用 mcp 的默认值：
+        #   timeout          mcp 默认仅 **5.0s**（实测 inspect.signature 确认），
+        #                    控制握手等常规 HTTP 操作。远端 MCP 服务冷启动或
+        #                    跨网络时很容易超过 5s，失败后异常还会被 anyio 包成
+        #                    ExceptionGroup，日志里看不出是超时，排查成本极高。
+        #   sse_read_timeout 控制「等待下一个 SSE 事件」，是**空闲连接**的存活
+        #                    上限而非握手超时，默认 300s。设太短会把正常的空闲
+        #                    连接掐断，所以保守保留 300s 并做成可配置。
+        async with sse_client(
+            url,
+            headers=headers,
+            timeout=SSE_HTTP_TIMEOUT_SECONDS,
+            sse_read_timeout=SSE_READ_TIMEOUT_SECONDS,
+        ) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 self.session = session

@@ -134,21 +134,24 @@ def _resolve_all_ips(host: str, port: int | None) -> list["ipaddress.IPv4Address
     return ips
 
 
-def validate_sse_url(raw_url, allowed_hosts: "set[str] | frozenset[str] | None" = None) -> str:
-    """校验 sse MCP 服务器的 URL。通过则返回原 URL，否则抛 SSRFValidationError。
+def validate_url(raw_url, allowed_hosts=None, label="sse"):
+    """校验服务端将主动请求的 URL。通过则返回原 URL，否则抛 SSRFValidationError。
+
+    这是通用入口，供 MCP sse 与 Webhook 回调等所有"服务端发起出站请求"的场景复用。
 
     Args:
         raw_url: 用户提交的 URL
         allowed_hosts: 显式主机白名单（小写，不含端口）。命中则**跳过 IP 校验**。
             这是对抗 DNS rebinding 的唯一可靠手段 —— 白名单里的主机由管理员
             事先确认过，即使它解析到内网也放行。
-            来自 config.MCP_SSE_ALLOWED_HOSTS（逗号分隔）。
+            MCP sse 来自 config.MCP_SSE_ALLOWED_HOSTS（逗号分隔）。
+        label: 仅用于错误信息中的场景名（如 "sse"、"webhook"），不影响校验逻辑。
 
     Raises:
         SSRFValidationError: 拒绝原因，str(e) 可直接回给前端
     """
     if not raw_url or not isinstance(raw_url, str):
-        raise SSRFValidationError("sse 类型必须提供 url")
+        raise SSRFValidationError(f"{label} 类型必须提供 url")
 
     url = raw_url.strip()
     if len(url) > 2048:
@@ -162,7 +165,7 @@ def validate_sse_url(raw_url, allowed_hosts: "set[str] | frozenset[str] | None" 
     scheme = (parsed.scheme or "").lower()
     if scheme not in ALLOWED_SCHEMES:
         raise SSRFValidationError(
-            f"不支持的协议 '{parsed.scheme}'，sse 只允许 http / https"
+            f"不支持的协议 '{parsed.scheme}'，{label} 只允许 http / https"
         )
 
     # urlparse 对 "http://user:pass@host" 会解析出 username/password。
@@ -208,6 +211,15 @@ def validate_sse_url(raw_url, allowed_hosts: "set[str] | frozenset[str] | None" 
             )
 
     return raw_url
+
+
+def validate_sse_url(raw_url, allowed_hosts=None) -> str:
+    """校验 MCP sse 服务器 URL（validate_url 的场景化包装，保留历史调用名）。
+
+    MCP 路由层、连接层复检以及既有测试都用这个名字，故保留。
+    新场景（如 Webhook 回调）请直接调用 validate_url 并传合适的 label。
+    """
+    return validate_url(raw_url, allowed_hosts, label="sse")
 
 
 def parse_allowed_hosts(raw: str) -> frozenset:

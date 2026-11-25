@@ -2,6 +2,11 @@ import os
 import json
 from dotenv import load_dotenv
 
+# ssrf_guard 只依赖标准库（ipaddress/logging/socket/urlparse），
+# 且 app/services/__init__.py 为空，故此导入不会造成循环依赖。
+# 已实测验证：from app.config import Config 可正常导入。
+from app.services.ssrf_guard import parse_allowed_hosts
+
 load_dotenv()
 
 
@@ -75,6 +80,15 @@ class Config:
     VERIFY_ENABLED = os.getenv("VERIFY_ENABLED", "false").lower() == "true"
     VERIFY_MODEL = os.getenv("VERIFY_MODEL", "")
 
+    # AI 免责声明：拼在每条 AI 回复末尾（见 app/middleware.py）
+    #
+    # ⚠️ 必须在这里定义。此前 middleware 读 os.getenv 而管理界面读写
+    # current_app.config，两边不是同一份数据 —— 管理员在界面改了免责声明，
+    # 接口返回成功、刷新也显示新值，但实际拼进回复的文案纹丝不动。
+    # 现在 config 是唯一数据源：启动时从 env 取初值，运行时可被
+    # POST /api/config/disclaimer 覆盖，middleware 每次都读 config。
+    AI_DISCLAIMER_TEXT = os.getenv("AI_DISCLAIMER_TEXT", "").strip()
+
     # Knowledge Search (知识库检索工具)
     KNOWLEDGE_SEARCH_ENABLED = os.getenv("KNOWLEDGE_SEARCH_ENABLED", "false").lower() == "true"
 
@@ -117,6 +131,21 @@ class Config:
     #    stdio 会 spawn 任意本地进程（等价 RCE），始终仅管理员可添加。
     MCP_ALLOW_USER_CUSTOM = os.getenv("MCP_ALLOW_USER_CUSTOM", "false").lower() == "true"
 
+    # MCP 连接超时（秒）。三项分别对应 client_manager 里的同名模块级常量，
+    # 由 create_app() 调 configure_mcp_timeouts() 注入 —— 连接跑在 MCP 专用
+    # 事件循环线程上，那里没有 Flask app context，读不到 current_app。
+    #
+    # MCP_CONNECT_TIMEOUT: 等待单个服务器连上的总上限。原先硬编码 30s
+    #   （range(300) 次 0.1s 轮询），超时后只 return False 而**不取消任务**，
+    #   导致 stdio 的 npx/uvx 子进程变孤儿泄漏。现已改为超时即 cancel。
+    # MCP_SSE_HTTP_TIMEOUT: sse_client 的 HTTP 操作超时。mcp 默认仅 **5s**，
+    #   远端服务冷启动极易超时，且异常被 anyio 包成 ExceptionGroup 看不出原因。
+    # MCP_SSE_READ_TIMEOUT: 等待下一个 SSE 事件的超时，即**空闲连接**存活上限，
+    #   不是握手超时。调小会把正常空闲连接掐断，故保守沿用 mcp 默认 300s。
+    MCP_CONNECT_TIMEOUT = float(os.getenv("MCP_CONNECT_TIMEOUT", "30"))
+    MCP_SSE_HTTP_TIMEOUT = float(os.getenv("MCP_SSE_HTTP_TIMEOUT", "30"))
+    MCP_SSE_READ_TIMEOUT = float(os.getenv("MCP_SSE_READ_TIMEOUT", "300"))
+
     # sse URL 的主机白名单（逗号分隔，小写，不含端口）。
     # 命中的主机跳过 SSRF 校验 —— 用于两类场景：
     #   1. 本地开发时允许 127.0.0.1（否则会被 SSRF 校验拦下）
@@ -130,6 +159,17 @@ class Config:
         for h in os.getenv("MCP_SSE_ALLOWED_HOSTS", "").split(",")
         if h.strip()
     }
+
+    # Webhook 回调地址的主机白名单（逗号分隔，小写，不含端口）。
+    # 与 MCP_SSE_ALLOWED_HOSTS **刻意分开**：两者是不同的出站通道，
+    # 共用一个开关会导致"放开 MCP 本地调试"顺带放开了 webhook 回调内网。
+    # 出站 webhook 回调由 webhook_service.send_completion_webhook 发起
+    # requests.post，同样构成 SSRF 面（可读云元数据 / 探本机端口），
+    # 故 register_webhook 入库前会用 ssrf_guard.validate_url 校验。
+    # ⚠️ 默认**空**：安全默认，全部主机都校验。
+    WEBHOOK_ALLOWED_HOSTS = parse_allowed_hosts(
+        os.getenv("WEBHOOK_ALLOWED_HOSTS", "")
+    )
 
     # Logging (结构化日志)
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -185,6 +225,10 @@ class TestingConfig(Config):
     # MCP_SSE_ALLOWED_HOSTS=127.0.0.1,localhost，测试就会因白名单命中而
     # 放行本该被 SSRF 校验拦下的地址，断言随本地配置漂移。
     MCP_SSE_ALLOWED_HOSTS = frozenset()
+
+    # 同理固定为空，不继承 .env。否则本地填了 WEBHOOK_ALLOWED_HOSTS=127.0.0.1
+    # 会让 webhook 的 SSRF 测试因白名单命中而放行内网地址，断言随开发机配置漂移。
+    WEBHOOK_ALLOWED_HOSTS = frozenset()
 
     # 生产库名，供 conftest 做最后一道保险校验
     PRODUCTION_DATABASE_NAME = (

@@ -121,6 +121,11 @@ def _restore_global_config(app):
         "MCP_ENABLED",
         "MCP_ALLOW_USER_CUSTOM",
         "MCP_SSE_ALLOWED_HOSTS",
+        # API_KEY 与 WEBHOOK_ALLOWED_HOSTS 也必须还原：
+        # webhook 测试会临时设置它们来验证认证/白名单行为，
+        # app 是 session 级，不还原会污染后续所有用例。
+        "API_KEY",
+        "WEBHOOK_ALLOWED_HOSTS",
         "SKILLS_ENABLED",
     )
     with app.app_context():

@@ -20,7 +20,6 @@ from app.services.security_service import (
     require_api_key, filter_input, log_audit
 )
 from app.services.auth_service import get_current_user, login_required, admin_required
-from app.middleware import get_disclaimer
 from app.services import cache_service as cache_service_module
 from app.services.cache_service import hash_context
 from app.errors import BadRequestError, NotFoundError

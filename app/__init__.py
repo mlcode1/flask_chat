@@ -223,11 +223,19 @@ def create_app(config_override=None):
     from app import websocket
     websocket.register_handlers(socketio, app)
 
-    # 注入 sse SSRF 白名单到 client_manager（模块级变量）。
+    # 注入 sse SSRF 白名单与超时配置到 client_manager（模块级变量）。
     # ⚠️ 必须在 _start_mcp_init_background 之前 —— 后台连接会对每个 sse URL
-    #    做 SSRF 复检，读取的正是这里注入的白名单。
-    from app.mcp.client_manager import configure_sse_guard
+    #    做 SSRF 复检、并按这里的超时值建连，读取的正是这里注入的配置。
+    # 为什么用注入而不是在 client_manager 里读 current_app：MCP 连接跑在专用
+    # 事件循环线程上，那个线程没有 Flask app context，读 current_app 必然
+    # RuntimeError（与 configure_sse_guard 同一个原因）。
+    from app.mcp.client_manager import configure_sse_guard, configure_mcp_timeouts
     configure_sse_guard(app.config.get('MCP_SSE_ALLOWED_HOSTS'))
+    configure_mcp_timeouts(
+        connect=app.config.get('MCP_CONNECT_TIMEOUT'),
+        sse_http=app.config.get('MCP_SSE_HTTP_TIMEOUT'),
+        sse_read=app.config.get('MCP_SSE_READ_TIMEOUT'),
+    )
 
     # 启动 MCP 后台初始化（不阻塞端口监听）
     if app.config.get('MCP_ENABLED', False):
